@@ -1,0 +1,75 @@
+name: Native build and tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  whitespace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check changed lines for whitespace errors
+        shell: bash
+        env:
+          PREVIOUS_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          base=$PREVIOUS_SHA
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            if [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+              base=$(git hash-object -w -t tree --stdin </dev/null)
+            else
+              base=$(git merge-base "refs/remotes/origin/$DEFAULT_BRANCH" HEAD)
+            fi
+          fi
+          git diff --check "$base" HEAD --
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo +stable test --workspace --locked
+      - run: cargo +stable build --workspace --locked
+      - name: rmem interactive smoke check
+        if: runner.os != 'Windows'
+        run: python3 .github/scripts/rmem-smoke.py target/debug/rmem
+      - name: fsz Windows directory symlink smoke check
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/fsz-windows-symlink-smoke.ps1
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check packaging scripts
+        shell: bash
+        run: |
+          sh -n packaging/install.sh
+          node --check packaging/launch.cjs
+          node --check packaging/stage.mjs
+      - name: Stage and inspect npm packages
+        shell: bash
+        run: |
+          mkdir assets
+          for platform in linux-x64 darwin-arm64; do
+            for tool in fsz rmem; do
+              printf '#!/bin/sh\nexit 0\n' > "assets/$tool-$platform"
+            done
+          done
+          for tool in fsz rmem; do
+            printf 'placeholder\n' > "assets/$tool-win32-x64.exe"
+          done
+          node packaging/stage.mjs 0.0.0 assets npm-packages
+          for name in devops-tool-linux-x64 devops-tool-darwin-arm64 devops-tool-win32-x64 fsz rmem devops-tool; do
+            npm pack "./npm-packages/$name" --dry-run >/dev/null
+          done

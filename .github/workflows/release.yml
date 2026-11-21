@@ -1,0 +1,135 @@
+name: Publish CLI release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      number: ${{ steps.version.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate release tag and source commit
+        id: version
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Release tags must use the stable vX.Y.Z format without leading zeroes."
+            exit 1
+          fi
+          git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "::error::The tagged commit must be in the history of the default branch ($DEFAULT_BRANCH)."
+            exit 1
+          fi
+          echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Check npm publishing secret
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "$NPM_TOKEN" ]]; then
+            echo "::error::Configure the NPM_TOKEN repository secret before publishing a tag."
+            exit 1
+          fi
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x64
+            suffix: ''
+          - runner: macos-15
+            platform: darwin-arm64
+            suffix: ''
+          - runner: windows-2025
+            platform: win32-x64
+            suffix: .exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: cargo +stable build --release --workspace --locked
+      - name: Stage executables
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          mkdir release-assets
+          for tool in fsz rmem; do
+            cp "target/release/$tool$SUFFIX" "release-assets/$tool-$PLATFORM$SUFFIX"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.validate.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Publish or reuse GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            rm -r assets
+            gh release download "$GITHUB_REF_NAME" --dir assets
+            test "$(<assets/SOURCE_COMMIT)" = "$(git rev-parse HEAD)"
+            (cd assets && sha256sum --check SHA256SUMS)
+          else
+            git rev-parse HEAD > assets/SOURCE_COMMIT
+            cp packaging/install.sh assets/install.sh
+            (cd assets && sha256sum fsz-* rmem-* install.sh > SHA256SUMS)
+            gh release create "$GITHUB_REF_NAME" assets/* \
+              --title "$GITHUB_REF_NAME" --notes "Built from source commit $(git rev-parse HEAD)."
+          fi
+      - name: Publish missing npm packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node packaging/stage.mjs "$VERSION" assets npm-packages
+          for name in devops-tool-linux-x64 devops-tool-darwin-arm64 devops-tool-win32-x64 fsz rmem devops-tool; do
+            if npm view "@mel0nyrame/$name@$VERSION" version --json >npm-view.json; then
+              echo "Already published: @mel0nyrame/$name@$VERSION"
+            elif jq -e '.error.code == "E404"' npm-view.json >/dev/null; then
+              npm publish "./npm-packages/$name" --access public
+            else
+              exit 1
+            fi
+          done

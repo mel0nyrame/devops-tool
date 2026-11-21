@@ -1,0 +1,13 @@
+[package]
+name = "fsz"
+version = "0.1.2"
+edition = "2024"
+description = "A tiny CLI to inspect file and directory sizes"
+license = "MIT"
+
+[[bin]]
+name = "fsz"
+path = "src/main.rs"
+
+[dependencies]
+comfy-table = "8.0.0"
