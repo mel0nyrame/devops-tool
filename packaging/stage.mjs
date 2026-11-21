@@ -3,7 +3,8 @@ import { copyFile, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const [version, assets, output] = process.argv.slice(2);
-const scope = '@mel0nyrame/';
+const scope = '@melonyrame/';
+const repository = { type: 'git', url: 'git+https://github.com/mel0nyrame/devops-tool.git' };
 const tools = ['fsz', 'rmem'];
 const platforms = [['linux', 'x64'], ['darwin', 'arm64'], ['win32', 'x64']];
 const optionalDependencies = {};
@@ -12,7 +13,7 @@ const template = await readFile(new URL('./launch.cjs', import.meta.url), 'utf8'
 async function stage(name, fields) {
   const dir = join(output, name);
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: scope + name, version, ...fields }, null, 2));
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ name: scope + name, version, license: 'MIT', repository, ...fields }, null, 2));
   return dir;
 }
 

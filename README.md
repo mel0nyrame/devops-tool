@@ -27,12 +27,12 @@ To try the tools without installing them, run `cargo run --locked -p fsz -- .` o
 These commands become available after the first successful publication. Supported targets are Windows x64, macOS arm64, and Linux x64 with glibc.
 
 ```sh
-npm install -g @mel0nyrame/devops-tool
+npm install -g @melonyrame/devops-tool
 # Or install the same suite with Bun:
-bun add -g @mel0nyrame/devops-tool
+bun add -g @melonyrame/devops-tool
 ```
 
-Use `@mel0nyrame/fsz` or `@mel0nyrame/rmem` for a single tool. Before switching between the suite and a single-tool package, uninstall the old package. The global launchers use Node. With Bun but no Node, use `bunx --bun -p @mel0nyrame/fsz fsz .` or `bunx --bun -p @mel0nyrame/rmem rmem`.
+Use `@melonyrame/fsz` or `@melonyrame/rmem` for a single tool. Before switching between the suite and a single-tool package, uninstall the old package. The global launchers use Node. With Bun but no Node, use `bunx --bun -p @melonyrame/fsz fsz .` or `bunx --bun -p @melonyrame/rmem rmem`.
 
 To install without Node, npm, or Bun, run the standalone installer in a Unix shell (Git Bash on Windows):
 

@@ -6,7 +6,7 @@ const platform = `${process.platform}-${process.arch}`;
 const suffix = process.platform === 'win32' ? '.exe' : '';
 let manifest;
 try {
-  manifest = require.resolve(`@mel0nyrame/devops-tool-${platform}/package.json`);
+  manifest = require.resolve(`@melonyrame/devops-tool-${platform}/package.json`);
 } catch {
   console.error(`${tool}: no binary for ${platform}; check platform support and install optional dependencies`);
   process.exit(1);

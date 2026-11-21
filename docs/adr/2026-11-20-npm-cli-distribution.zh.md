@@ -14,13 +14,13 @@
 
 Release 任务使用工作流内置的 `GITHUB_TOKEN`，并只为该任务授予 `contents: write` 权限。npm 发布使用 Actions 仓库 secret `NPM_TOKEN`。不需要独立发布仓库或额外的 Release token。
 
-公共套件包 `@mel0nyrame/devops-tool` 注册两条命令。`@mel0nyrame/fsz` 和 `@mel0nyrame/rmem` 各注册一条命令。它们通过可选依赖共用 `@mel0nyrame/devops-tool-linux-x64`、`@mel0nyrame/devops-tool-darwin-arm64` 和 `@mel0nyrame/devops-tool-win32-x64`。启动时只执行已安装的二进制，不运行安装脚本，也不进行本地编译。全局入口使用 Node；只装 Bun 时，可以通过 `bunx --bun` 运行工具。当前启动器不支持仅有 Bun 时在 Unix 直接运行全局命令。套件包和单工具包切换时先卸载旧包，不强制覆盖。
+公共套件包 `@melonyrame/devops-tool` 注册两条命令。`@melonyrame/fsz` 和 `@melonyrame/rmem` 各注册一条命令。它们通过可选依赖共用 `@melonyrame/devops-tool-linux-x64`、`@melonyrame/devops-tool-darwin-arm64` 和 `@melonyrame/devops-tool-win32-x64`。启动时只执行已安装的二进制，不运行安装脚本，也不进行本地编译。全局入口使用 Node；只装 Bun 时，可以通过 `bunx --bun` 运行工具。当前启动器不支持仅有 Bun 时在 Unix 直接运行全局命令。套件包和单工具包切换时先卸载旧包，不强制覆盖。
 
 重试时，只有 Release 中的 `SOURCE_COMMIT` 与 tag 对应的源码提交一致，且校验和通过，工作流才复用该 Release。npm 步骤跳过已存在的包版本。npm 已发布版本不可修改；变更后的版本必须使用新的 `vX.Y.Z` tag。
 
 ### 维护者配置和发布步骤
 
-首次发布前，创建名为 `NPM_TOKEN` 的 Actions 仓库 secret。npm 必须允许该凭据执行无人值守发布，并允许它创建或更新上述六个公开 `@mel0nyrame` 包。确保发布工作流已经位于默认分支，并为仓库启用 GitHub Actions。
+首次发布前，创建名为 `NPM_TOKEN` 的 Actions 仓库 secret。npm 必须允许该凭据执行无人值守发布，并允许它创建或更新上述六个公开 `@melonyrame` 包。确保发布工作流已经位于默认分支，并为仓库启用 GitHub Actions。
 
 先确保目标提交已经进入默认分支，再创建并推送 tag：
 

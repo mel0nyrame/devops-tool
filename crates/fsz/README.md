@@ -9,7 +9,7 @@
 Use the [project installation instructions](../../README.md#install) to install from source or a public release. After a public version is available, install the single-tool npm package with:
 
 ```sh
-npm install -g @mel0nyrame/fsz
+npm install -g @melonyrame/fsz
 ```
 
 ## Usage

@@ -9,7 +9,7 @@
 按[项目安装说明](../../README.zh.md#安装)从源码或公开版本安装。公开版本发布后，只安装 `fsz` 的 npm 包时运行：
 
 ```sh
-npm install -g @mel0nyrame/fsz
+npm install -g @melonyrame/fsz
 ```
 
 ## 用法

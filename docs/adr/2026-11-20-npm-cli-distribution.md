@@ -14,13 +14,13 @@ The maintainer selected a tag-driven release in the public source repository. [T
 
 The Release job uses the workflow's built-in `GITHUB_TOKEN` with job-scoped `contents: write` permission. npm publication uses the `NPM_TOKEN` Actions repository secret. No separate release repository or release token is required.
 
-The public suite package `@mel0nyrame/devops-tool` registers both commands. `@mel0nyrame/fsz` and `@mel0nyrame/rmem` each register one command. They share `@mel0nyrame/devops-tool-linux-x64`, `@mel0nyrame/devops-tool-darwin-arm64`, and `@mel0nyrame/devops-tool-win32-x64` through optional dependencies. Launch uses an installed binary, with no install-time scripts or compilation. Global launchers use Node; Bun alone can execute a tool through `bunx --bun`. Direct global launch on Unix with Bun alone remains unsupported by this launcher. Uninstall the old package before switching between the suite and a single-tool package; do not force overwrite.
+The public suite package `@melonyrame/devops-tool` registers both commands. `@melonyrame/fsz` and `@melonyrame/rmem` each register one command. They share `@melonyrame/devops-tool-linux-x64`, `@melonyrame/devops-tool-darwin-arm64`, and `@melonyrame/devops-tool-win32-x64` through optional dependencies. Launch uses an installed binary, with no install-time scripts or compilation. Global launchers use Node; Bun alone can execute a tool through `bunx --bun`. Direct global launch on Unix with Bun alone remains unsupported by this launcher. Uninstall the old package before switching between the suite and a single-tool package; do not force overwrite.
 
 Retries reuse a Release only when its `SOURCE_COMMIT` matches the tagged source commit and its checksums pass. The npm step skips package versions that already exist. A published npm version is immutable; a changed release requires a new `vX.Y.Z` tag.
 
 ### Maintainer setup and release procedure
 
-Before the first release, create an Actions repository secret named `NPM_TOKEN`. npm must accept it for unattended publication, and it must be allowed to create or update all six public `@mel0nyrame` packages listed above. Keep the release workflow on the default branch and enable GitHub Actions for the repository.
+Before the first release, create an Actions repository secret named `NPM_TOKEN`. npm must accept it for unattended publication, and it must be allowed to create or update all six public `@melonyrame` packages listed above. Keep the release workflow on the default branch and enable GitHub Actions for the repository.
 
 Tag a commit that is already in the default branch, then push the tag:
 

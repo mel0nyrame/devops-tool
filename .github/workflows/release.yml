@@ -78,7 +78,7 @@ jobs:
           for tool in fsz rmem; do
             cp "target/release/$tool$SUFFIX" "release-assets/$tool-$PLATFORM$SUFFIX"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.platform }}
           path: release-assets/*
@@ -99,7 +99,7 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: assets
           merge-multiple: true
@@ -125,8 +125,8 @@ jobs:
         run: |
           node packaging/stage.mjs "$VERSION" assets npm-packages
           for name in devops-tool-linux-x64 devops-tool-darwin-arm64 devops-tool-win32-x64 fsz rmem devops-tool; do
-            if npm view "@mel0nyrame/$name@$VERSION" version --json >npm-view.json; then
-              echo "Already published: @mel0nyrame/$name@$VERSION"
+            if npm view "@melonyrame/$name@$VERSION" version --json >npm-view.json; then
+              echo "Already published: @melonyrame/$name@$VERSION"
             elif jq -e '.error.code == "E404"' npm-view.json >/dev/null; then
               npm publish "./npm-packages/$name" --access public
             else

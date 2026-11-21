@@ -27,12 +27,12 @@ cargo install --locked --path crates/rmem
 以下命令在首个版本成功发布后可用。目标平台为 Windows x64、macOS arm64 和 Linux x64（glibc）。
 
 ```sh
-npm install -g @mel0nyrame/devops-tool
+npm install -g @melonyrame/devops-tool
 # 或使用 Bun 安装同一个套件包：
-bun add -g @mel0nyrame/devops-tool
+bun add -g @melonyrame/devops-tool
 ```
 
-只装一个工具时，使用 `@mel0nyrame/fsz` 或 `@mel0nyrame/rmem`。在套件包与单工具包之间切换时，先卸载旧包。全局命令入口使用 Node；如果只有 Bun，可以用 `bunx --bun -p @mel0nyrame/fsz fsz .` 或 `bunx --bun -p @mel0nyrame/rmem rmem`。
+只装一个工具时，使用 `@melonyrame/fsz` 或 `@melonyrame/rmem`。在套件包与单工具包之间切换时，先卸载旧包。全局命令入口使用 Node；如果只有 Bun，可以用 `bunx --bun -p @melonyrame/fsz fsz .` 或 `bunx --bun -p @melonyrame/rmem rmem`。
 
 不想使用 Node、npm 或 Bun 时，在 Unix shell（Windows 上为 Git Bash）中运行：
 
