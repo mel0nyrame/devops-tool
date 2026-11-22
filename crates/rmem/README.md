@@ -6,11 +6,13 @@
 
 ## Install
 
-Use the [project installation instructions](../../README.md#install) to install from source or a public release. After a public version is available, install the single-tool npm package with:
+Install the single-tool npm package with:
 
 ```sh
 npm install -g @melonyrame/rmem
 ```
+
+See the [project installation instructions](../../README.md#install) for other installation methods.
 
 ## Usage
 

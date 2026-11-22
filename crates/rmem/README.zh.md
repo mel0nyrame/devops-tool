@@ -6,11 +6,13 @@
 
 ## 安装
 
-按[项目安装说明](../../README.zh.md#安装)从源码或公开版本安装。公开版本发布后，只安装 `rmem` 的 npm 包时运行：
+运行以下命令，只安装 `rmem`。
 
 ```sh
 npm install -g @melonyrame/rmem
 ```
+
+其他安装方式见[项目安装说明](../../README.zh.md#安装)。
 
 ## 用法
 
