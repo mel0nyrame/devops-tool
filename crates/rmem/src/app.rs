@@ -84,6 +84,7 @@ pub struct App {
     pub search: String,
     show_details: bool,
     should_quit: bool,
+    pending_g: bool,
 }
 
 impl Default for App {
@@ -96,6 +97,7 @@ impl Default for App {
             search: String::new(),
             show_details: false,
             should_quit: false,
+            pending_g: false,
         }
     }
 }
@@ -164,6 +166,7 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        let pending_g = std::mem::take(&mut self.pending_g);
         match key.code {
             KeyCode::Char('r') => return KeyOutcome::Refresh,
             KeyCode::Char('q') => self.should_quit = true,
@@ -174,8 +177,18 @@ impl App {
             KeyCode::Char('/') => self.input_mode = InputMode::Search,
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
+            KeyCode::Char('g') if key.modifiers.is_empty() => {
+                if pending_g {
+                    self.select_first();
+                } else {
+                    self.pending_g = true;
+                }
+            }
             KeyCode::Home => self.select_first(),
             KeyCode::End => self.select_last(),
+            KeyCode::Char('G') if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
+                self.select_last();
+            }
             KeyCode::Enter => {
                 if self.selected_process().is_some() {
                     self.show_details = true;
@@ -360,6 +373,65 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(app.details_process().is_none());
         assert_eq!(app.selected_process().unwrap().pid, 22);
+    }
+
+    #[test]
+    fn vim_jumps_use_filtered_order_and_require_consecutive_g_presses() {
+        let mut app = App::default();
+        let processes = vec![
+            process(11, 50, "serve api"),
+            process(22, 30, "serve ui"),
+            process(33, 70, "backup"),
+            process(44, 10, "serve cache"),
+        ];
+        app.apply_snapshot(processes.clone());
+        search(&mut app, "serve");
+        press(&mut app, KeyCode::Char('p'));
+
+        let g = KeyCode::Char('g');
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(app.selected_process().unwrap().pid, 11);
+
+        press(&mut app, g);
+        assert_eq!(app.selected_process().unwrap().pid, 11);
+        app.apply_snapshot(processes);
+        press(&mut app, g);
+        assert_eq!(app.selected_process().unwrap().pid, 44);
+
+        press(&mut app, g);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, g);
+        assert_eq!(app.selected_process().unwrap().pid, 22);
+        press(&mut app, g);
+        assert_eq!(app.selected_process().unwrap().pid, 44);
+    }
+
+    #[test]
+    fn vim_jumps_do_not_change_search_editing_or_details() {
+        let mut app = App::default();
+        app.apply_snapshot(vec![process(11, 50, "Gg api"), process(22, 30, "Gg ui")]);
+
+        search(&mut app, "Gg");
+        assert_eq!(app.search, "Gg");
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.details_process().unwrap().pid, 22);
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.details_process().unwrap().pid, 11);
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        search(&mut app, "missing");
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.selected_row(), None);
     }
 
     #[test]
