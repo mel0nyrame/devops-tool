@@ -185,6 +185,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             key("q"), text(" quit   "),
             key("↑↓/jk"), text(" select   "),
+            key("gg/G"), text(" first/last   "),
             key("m"), text(" mem   "),
             key("c"), text(" cpu   "),
             key("p"), text(" pid   "),
@@ -202,7 +203,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             text("   "),
             key("Esc"), text(" clear   "),
             key("/"), text(" edit   "),
-            key("Enter"), text(" details"),
+            key("Enter"), text(" details   "),
+            key("gg/G"), text(" first/last"),
         ])
     };
 

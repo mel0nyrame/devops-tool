@@ -109,12 +109,12 @@ def smoke(binary):
         expect(r"rmem-smoke> ", "initial shell prompt", terminal=True)
         before = termios.tcgetattr(fd)
         send((shlex.quote(binary) + "; printf 'rmem-exit:%s\\n' \"$?\"\n").encode())
-        expect(r"Processes \d+ / \d+", "process list")
+        expect(r"Processes \d+ / \d+[\s\S]*gg/G first/last", "process list shortcut hint")
         send(b"/")
         expect("SEARCH", "search mode")
         pid = str(shell)
         send(pid.encode() + b"\r")
-        expect(r"filter: " + pid + r"\b", "PID filter")
+        expect(r"filter: " + pid + r"\b[^\n]*gg/G first/last", "PID filter shortcut hint")
 
         # Search is substring-based, so more than one row can match a PID.
         for _ in range(30):
@@ -133,7 +133,7 @@ def smoke(binary):
         assert termios.tcgetattr(fd) == before, "terminal settings were not restored"
         send(b"printf '%s%s\\n' rmem-shell- restored\n")
         expect(r"rmem-shell-restored\r?\n", "shell executes input after exit", terminal=True)
-        print("rmem: PID search, matching details, Esc, q, and terminal restoration passed")
+        print("rmem: shortcut hints, PID search, matching details, Esc, q, and terminal restoration passed")
     finally:
         os.close(fd)
         try:
