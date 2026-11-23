@@ -2,6 +2,7 @@
 
 ## Repository guidance
 
+- **Feature worktree:** Before implementing a feature, create a new Git worktree under the repository root’s `.worktree/` directory and implement and verify the feature there.
 - **Portability:** Preserve command usage and core interactions. Before moving source, run `git status --short --untracked-files=all`; `git diff` omits untracked work.
 - **Workspace:** Keep each tool an independent member under `crates/`. The root `Cargo.lock` governs the workspace, not leftover member lockfiles. Read the accepted [layout ADR](docs/adr/2026-11-20-cli-source-layout.md) before changing package boundaries.
 - **Tool changes:** Read the affected crate's instructions ([`fsz`](crates/fsz/AGENTS.md), [`rmem`](crates/rmem/AGENTS.md)) for behavior and smoke checks. Each tool's README owns its user-facing contract.
