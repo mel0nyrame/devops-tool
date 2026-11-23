@@ -26,12 +26,14 @@ cargo run --locked -p rmem
 | --- | --- |
 | `q` | Quit from the process list |
 | `↑` / `↓`, `k` / `j` | Select previous or next process |
-| `Home` / `End` | Select first or last process |
+| `gg` / `G`, `Home` / `End` | Select the first or last process in the current list |
 | `m` / `c` / `p` / `t` | Sort by memory, CPU usage, PID, or CPU time |
 | `/` | Search by PID, user, name, or command |
 | `Enter` | Apply a search or open the selected process's details |
 | `Esc` | Close details or clear the search |
 | `r` | Refresh now |
+
+For `gg`, press lowercase `g` twice without pressing another key in between. There is no time limit. `gg` and `G` work only while browsing the process list. They use the current search results and sort order.
 
 ## Metrics
 
