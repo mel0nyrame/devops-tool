@@ -87,7 +87,10 @@ impl ScanBoundary {
     }
 }
 
-pub(crate) fn scan_directory(path: &Path) -> io::Result<Vec<EntryInfo>> {
+pub(crate) fn scan_directory(
+    path: &Path,
+    visit: &mut impl FnMut(),
+) -> io::Result<Vec<EntryInfo>> {
     let boundary = ScanBoundary::new(&fs::metadata(path)?);
 
     let mut entries = Vec::new();
@@ -107,6 +110,7 @@ pub(crate) fn scan_directory(path: &Path) -> io::Result<Vec<EntryInfo>> {
             }
         };
 
+        visit();
         let entry_path = entry.path();
 
         let name = entry
@@ -138,7 +142,7 @@ pub(crate) fn scan_directory(path: &Path) -> io::Result<Vec<EntryInfo>> {
 
         let is_dir = metadata.is_dir();
 
-        match measure_path(&entry_path, &boundary) {
+        match measure_path(&entry_path, &boundary, visit) {
             Ok(MeasureResult::Exact(size)) => {
                 entries.push(EntryInfo {
                     name,
@@ -203,6 +207,7 @@ pub(crate) fn scan_directory(path: &Path) -> io::Result<Vec<EntryInfo>> {
 fn measure_path(
     path: &Path,
     boundary: &ScanBoundary,
+    visit: &mut impl FnMut(),
 ) -> io::Result<MeasureResult> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -247,10 +252,7 @@ fn measure_path(
     }
 
     if metadata.is_dir() {
-        return directory_size(
-            path,
-            boundary
-        );
+        return directory_size(path, boundary, visit);
     }
 
     Ok(MeasureResult::Special)
@@ -259,6 +261,7 @@ fn measure_path(
 fn directory_size(
     path: &Path,
     boundary: &ScanBoundary,
+    visit: &mut impl FnMut(),
 ) -> io::Result<MeasureResult> {
     let read_dir = match fs::read_dir(path) {
         Ok(read_dir) => read_dir,
@@ -296,12 +299,10 @@ fn directory_size(
             }
         };
 
+        visit();
         let child_path = entry.path();
 
-        match measure_path(
-            &child_path,
-            boundary,
-        ) {
+        match measure_path(&child_path, boundary, visit) {
             Ok(MeasureResult::Exact(size)) => {
                 total =
                     total.saturating_add(size);
@@ -345,5 +346,45 @@ fn directory_size(
         Ok(MeasureResult::Partial(total))
     } else {
         Ok(MeasureResult::Exact(total))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visits_each_discovered_entry_once() -> io::Result<()> {
+        struct Fixture(std::path::PathBuf);
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!("fsz-visits-{}", std::process::id()));
+        fs::create_dir(&path)?;
+        let fixture = Fixture(path);
+        let root = fixture.0.join("root");
+        fs::create_dir_all(root.join("sub"))?;
+        fs::write(root.join("first"), [0; 3])?;
+        fs::write(root.join("sub/second"), [0; 5])?;
+
+        #[cfg(unix)]
+        {
+            let outside = fixture.0.join("outside");
+            fs::create_dir(&outside)?;
+            fs::write(outside.join("extra"), [0; 13])?;
+            std::os::unix::fs::symlink(&outside, root.join("sub/link"))?;
+        }
+
+        let mut visits = 0;
+        let entries = scan_directory(&root, &mut || visits += 1)?;
+        assert_eq!(visits, if cfg!(unix) { 4 } else { 3 });
+        assert_eq!(entries.len(), 2);
+        let total: u64 = entries.iter().filter_map(EntryInfo::measured_size).sum();
+        assert_eq!(total, 8);
+        Ok(())
     }
 }

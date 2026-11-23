@@ -23,6 +23,8 @@ cargo run --locked -p fsz -- "path/to/file or directory"
 
 The path defaults to the current directory. For a directory, the table lists its immediate entries; a subdirectory's size includes its scanned descendants.
 
+During a long directory scan, `fsz` shows a temporary count of visited entries if standard error is connected to a terminal. The count includes entries the scan discovers but does not measure. It does not show a percentage or estimate the time remaining. The final table is still written to standard output.
+
 ## Measurement
 
 - Sizes are logical bytes, not disk space allocated. Distinct hard-link entries are counted separately.

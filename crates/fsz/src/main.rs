@@ -4,12 +4,14 @@ use comfy_table::{
 };
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 mod directory_scan;
+mod scan_status;
 
 use directory_scan::{scan_directory, EntryInfo, EntryKind};
+use scan_status::ScanStatus;
 
 const BAR_WIDTH: usize = 18;
 
@@ -128,7 +130,15 @@ impl EntryInfo {
 }
 
 fn print_directory_overview(path: &Path) -> io::Result<()> {
-    let entries = scan_directory(path)?;
+    let entries = {
+        let stderr = io::stderr();
+        if stderr.is_terminal() {
+            let mut status = ScanStatus::new(stderr.lock());
+            scan_directory(path, &mut || status.visit())?
+        } else {
+            scan_directory(path, &mut || {})?
+        }
+    };
     print_directory_entries(path, entries);
     Ok(())
 }

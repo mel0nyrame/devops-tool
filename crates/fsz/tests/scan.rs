@@ -16,6 +16,7 @@ fn scan_output(path: &Path) -> String {
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty(), "{:?}", output);
     String::from_utf8(output.stdout).unwrap()
 }
 
