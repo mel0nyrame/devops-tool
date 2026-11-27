@@ -2,7 +2,7 @@
 
 [简体中文](README.zh.md) · [Screenshots](#screenshots) · [Install](#install) · [Platform status](#platform-status)
 
-Two independent Rust command-line tools for your local machine. Use [`fsz`](#fsz) to see how large files and folders are. Use [`rmem`](#rmem) to see which processes are using memory.
+Two published Rust command-line tools for your local machine. Use [`fsz`](#fsz) to see how large files and folders are. Use [`rmem`](#rmem) to see which processes are using memory. The source-only [`lfd`](crates/lfd/README.md) inspects potential app uninstall leftovers on macOS.
 
 <p align="center">
   <a href="#fsz"><img src="docs/assets/readme/fsz-overview.webp" width="48%" alt="File tree and size bars. Jump to the fsz screenshot."></a>
@@ -73,7 +73,7 @@ To try the tools directly from the checkout, run `cargo run --locked -p fsz -- .
 
 ## Platform status
 
-The [native CI workflow](.github/workflows/ci.yml) builds and tests both tools on Windows, macOS, and Linux.
+The [native CI workflow](.github/workflows/ci.yml) builds and tests `fsz` and `rmem` on Windows, macOS, and Linux.
 
 | Platform | `fsz` scan check | `rmem` terminal check |
 | --- | --- | --- |
@@ -81,5 +81,7 @@ The [native CI workflow](.github/workflows/ci.yml) builds and tests both tools o
 | Windows | Symbolic links and junctions in CI | Local x64 GNU check in CMD via WinPTY |
 
 The `fsz` check expects **8 B** when the scan skips a nested directory symlink and **13 B** when the symlink is the input. The `rmem` check covers PID search, matching process details, `Esc` to return to the list, and `q` to return to a working shell.
+
+The initial read-only `lfd` inspection was built and smoke-tested natively on macOS arm64 (26.7.3). `lfd` does not support Windows or Linux.
 
 [Glossary](GLOSSARY.md) · [Design decisions](docs/adr/)
