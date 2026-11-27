@@ -27,4 +27,16 @@ Application-name comparisons ignore case. Bundle IDs from metadata match exactly
 
 Symbolic links are not followed. Matching user-data links can appear in the list with their targets uninspected. Missing search directories have no entries; read errors and failed metadata checks are reported separately.
 
-This initial scope does not check standalone commands, Homebrew records, `.pkg` receipts, or shared configuration contents. It does not search the whole home directory. There are no cleanup locations: `lfd` does not select, move, edit, or delete any items.
+This initial scope does not check standalone commands, Homebrew records, `.pkg` receipts, or shared configuration contents. It does not search the whole home directory.
+
+## Cleanup preview
+
+The normal build leaves all items view-only: the application-directory search is not enough to complete the required main-program checks for cleanup. A matching name, a typed identifier, a receipt alone, a shared reference, or a standalone symbolic link does not make an item eligible.
+
+In isolated preview verification, a complete main-program check that finds no program, plus independent Bundle ID registration evidence, can make these exact current-user paths selectable:
+
+- `~/Library/Application Support/<bundle-id>` (directory), and its immediate regular files and directories. Only their names and types are checked, not their contents; links are not followed.
+- `~/Library/Preferences/<bundle-id>.plist` (regular file).
+- `~/Library/Caches/<bundle-id>` (directory).
+
+Nothing is selected by default. Use `Space` to toggle an eligible item and `Enter` to preview the selected paths. The preview lists full paths and known risks (including retained data or settings), identifies directories as including all descendants, and lists a selected parent directory instead of any of its selected descendants. Press `Enter` on the default **Cancel**, or `Esc`, to return to the results without changing the selection. This version cannot move, edit, or delete files.

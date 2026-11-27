@@ -26,14 +26,56 @@ pub enum BundleMatch {
 pub enum Evidence {
     ApplicationBundle(Application),
     FilenameMatch,
-    BundleIdentifierFilename { identifier: String, source: PathBuf },
+    BundleIdentifierFilename {
+        identifier: String,
+        source: PathBuf,
+    },
+    RegisteredBundleData {
+        identifier: String,
+        source: PathBuf,
+        app_data_root: PathBuf,
+    },
 }
 
 pub struct Item {
     pub path: PathBuf,
     pub kind: ArtifactKind,
     pub evidence: Evidence,
-    pub symbolic_link: bool,
+    pub file_type: fs::FileType,
+    in_cleanup_scope: bool,
+}
+
+impl Item {
+    pub fn selection_blocker(&self, program: &MainProgram) -> Option<&'static str> {
+        if self.file_type.is_symlink() {
+            return Some("symbolic links cannot be selected");
+        }
+        if !self.in_cleanup_scope {
+            return Some("outside the cleanup scope");
+        }
+        match (&self.evidence, program) {
+            (Evidence::RegisteredBundleData { .. }, MainProgram::NotFound) => None,
+            (
+                Evidence::RegisteredBundleData { .. } | Evidence::BundleIdentifierFilename { .. },
+                MainProgram::Found,
+            ) => Some("main program found"),
+            (Evidence::RegisteredBundleData { .. }, MainProgram::Incomplete) => {
+                Some("required main program checks incomplete")
+            }
+            _ => Some("application ownership not established"),
+        }
+    }
+}
+
+impl ArtifactKind {
+    pub fn risk(self) -> &'static str {
+        match self {
+            Self::ApplicationBundle => "may contain an installed application",
+            Self::ApplicationData => "may contain retained user data",
+            Self::Preferences => "may contain retained settings",
+            Self::Cache => "may contain cached data the application would need to recreate",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +99,7 @@ pub enum MainProgram {
 
 pub struct Report {
     pub main_program: MainProgram,
+    pub selection_program: MainProgram,
     pub items: Vec<Item>,
     pub issues: Vec<CheckIssue>,
 }
@@ -65,6 +108,7 @@ pub struct Application {
     pub path: PathBuf,
     pub metadata: Option<BundleMetadata>,
     pub matched_by: BundleMatch,
+    file_type: fs::FileType,
 }
 
 impl Application {
@@ -111,20 +155,34 @@ impl ApplicationCheck {
                 .as_ref()
                 .is_some_and(|app| matches!(app.matched_by, BundleMatch::Identifier)))
         .then_some(query);
-        let mut items = find_artifacts(locations, name_query, app.as_ref(), &mut issues);
+        let (registration, supplemental) = selection_evidence(locations, query);
+        let selection_program = match (&main_program, supplemental) {
+            (MainProgram::Found, _) | (_, MainProgram::Found) => MainProgram::Found,
+            (MainProgram::NotFound, MainProgram::NotFound) => MainProgram::NotFound,
+            _ => MainProgram::Incomplete,
+        };
+        let mut items = find_artifacts(
+            locations,
+            name_query,
+            app.as_ref(),
+            registration.as_deref(),
+            &mut issues,
+        );
         if let Some(app) = app {
             items.insert(
                 0,
                 Item {
                     path: app.path.clone(),
                     kind: ArtifactKind::ApplicationBundle,
+                    file_type: app.file_type,
+                    in_cleanup_scope: false,
                     evidence: Evidence::ApplicationBundle(app),
-                    symbolic_link: false,
                 },
             );
         }
         Report {
             main_program,
+            selection_program,
             items,
             issues,
         }
@@ -149,8 +207,8 @@ fn find_applications(
             {
                 continue;
             }
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => {}
+            let file_type = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => kind,
                 Ok(kind) if kind.is_symlink() => {
                     issues.push(CheckIssue {
                         source: CheckSource::Applications,
@@ -168,7 +226,7 @@ fn find_applications(
                     });
                     continue;
                 }
-            }
+            };
             let metadata_path = path.join("Contents/Info.plist");
             let metadata = match read_metadata(&metadata_path) {
                 Ok(parsed) => {
@@ -223,6 +281,7 @@ fn find_applications(
                     path,
                     metadata,
                     matched_by,
+                    file_type,
                 });
             }
         }
@@ -234,6 +293,7 @@ fn find_artifacts(
     locations: &Locations,
     name_query: Option<&str>,
     app: Option<&Application>,
+    registration: Option<&Path>,
     issues: &mut Vec<CheckIssue>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
@@ -271,12 +331,53 @@ fn find_artifacts(
                 continue;
             };
             match entry.file_type() {
-                Ok(file_type) => items.push(Item {
-                    path: entry.path(),
-                    kind,
-                    evidence,
-                    symbolic_link: file_type.is_symlink(),
-                }),
+                Ok(file_type) => {
+                    let in_cleanup_scope = match kind {
+                        ArtifactKind::ApplicationData | ArtifactKind::Cache => file_type.is_dir(),
+                        ArtifactKind::Preferences => name != stem && file_type.is_file(),
+                        ArtifactKind::ApplicationBundle => false,
+                    };
+                    let source =
+                        registration.filter(|_| in_cleanup_scope && name_query == Some(stem));
+                    let path = entry.path();
+                    let evidence =
+                        source.map_or(evidence, |source| Evidence::RegisteredBundleData {
+                            identifier: stem.to_owned(),
+                            source: source.to_owned(),
+                            app_data_root: path.clone(),
+                        });
+                    items.push(Item {
+                        path: path.clone(),
+                        kind,
+                        evidence,
+                        file_type,
+                        in_cleanup_scope,
+                    });
+                    if let Some(source) = source
+                        && matches!(kind, ArtifactKind::ApplicationData)
+                    {
+                        for child in entries(&path, CheckSource::UserData, issues) {
+                            match child.file_type() {
+                                Ok(file_type) => items.push(Item {
+                                    path: child.path(),
+                                    kind,
+                                    evidence: Evidence::RegisteredBundleData {
+                                        identifier: stem.to_owned(),
+                                        source: source.to_owned(),
+                                        app_data_root: path.clone(),
+                                    },
+                                    file_type,
+                                    in_cleanup_scope: file_type.is_file() || file_type.is_dir(),
+                                }),
+                                Err(error) => issues.push(CheckIssue {
+                                    source: CheckSource::UserData,
+                                    path: child.path(),
+                                    error,
+                                }),
+                            }
+                        }
+                    }
+                }
                 Err(error) => issues.push(CheckIssue {
                     source: CheckSource::UserData,
                     path: entry.path(),
@@ -286,6 +387,50 @@ fn find_artifacts(
         }
     }
     items
+}
+
+#[cfg(not(feature = "test-fixtures"))]
+fn selection_evidence(_: &Locations, _: &str) -> (Option<PathBuf>, MainProgram) {
+    // Discovery currently checks only application directories; that is not enough for selection.
+    (None, MainProgram::Incomplete)
+}
+
+#[cfg(feature = "test-fixtures")]
+fn selection_evidence(locations: &Locations, query: &str) -> (Option<PathBuf>, MainProgram) {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+
+    if !looks_like_bundle_id(query) {
+        return (None, MainProgram::Incomplete);
+    }
+    let records = locations.system_root.join("var/db/lfd-fixtures");
+    let source = records.join(format!("{query}.plist"));
+    let registration = read_metadata(&source)
+        .ok()
+        .filter(|parsed| {
+            parsed.invalid_keys.is_empty() && parsed.metadata.identifier.as_deref() == Some(query)
+        })
+        .map(|_| source);
+
+    // Reproduce OS-boundary outcomes only. The real application-directory scan still runs.
+    let mut response = String::new();
+    let checks = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK)
+        .open(records.join(format!("{query}.checks")))
+        .and_then(|file| {
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::other("not a regular fixture response"));
+            }
+            file.take(256).read_to_string(&mut response)
+        });
+    let supplemental = if checks.is_ok()
+        && response == "PATH: not found\nHomebrew: not found\nPackage receipts: not found\n"
+    {
+        MainProgram::NotFound
+    } else {
+        MainProgram::Incomplete
+    };
+    (registration, supplemental)
 }
 
 fn looks_like_bundle_id(query: &str) -> bool {

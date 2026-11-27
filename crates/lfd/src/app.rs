@@ -1,10 +1,10 @@
-use std::io;
+use std::{collections::BTreeSet, io};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, widgets::ListState};
 
 use crate::{
-    discovery::{ApplicationCheck, Report},
+    discovery::{ApplicationCheck, Item, Report},
     locations::Locations,
     ui,
 };
@@ -22,6 +22,9 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
     let mut selection = ListState::default().with_selected(Some(0));
     let mut issue_selection = ListState::default().with_selected(Some(0));
     let mut show_issues = false;
+    let mut show_preview = false;
+    let mut empty_preview = false;
+    let mut marked = BTreeSet::<usize>::new();
     let mut detail_scroll = 0_u16;
     loop {
         terminal.draw(|frame| match &view {
@@ -29,15 +32,30 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             View::Choose(check) => {
                 ui::draw_choices(frame, &check.matches, &mut selection, detail_scroll)
             }
+            View::Results(report) if show_preview => {
+                ui::draw_preview(frame, &preview_items(report, &marked), detail_scroll)
+            }
             View::Results(report) if show_issues => {
                 ui::draw_issues(frame, &report.issues, &mut issue_selection, detail_scroll)
             }
-            View::Results(report) => ui::draw_report(frame, report, &mut selection, detail_scroll),
+            View::Results(report) => ui::draw_report(
+                frame,
+                report,
+                &mut selection,
+                &marked,
+                empty_preview,
+                detail_scroll,
+            ),
         })?;
         let Event::Key(key) = event::read()? else {
             continue;
         };
         if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        if show_preview && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            show_preview = false;
+            detail_scroll = 0;
             continue;
         }
         if key.code == KeyCode::Esc
@@ -52,6 +70,9 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             KeyCode::PageUp => detail_scroll = detail_scroll.saturating_sub(5),
             KeyCode::Up | KeyCode::Down => detail_scroll = 0,
             _ => {}
+        }
+        if show_preview {
+            continue;
         }
         match view {
             View::Search => match key.code {
@@ -99,17 +120,53 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                 }
             }
             View::Results(ref report) => {
+                empty_preview = false;
                 if key.code == KeyCode::Char('i') && !report.issues.is_empty() {
                     show_issues = !show_issues;
                     detail_scroll = 0;
                 } else if show_issues {
                     browse(&mut issue_selection, key.code, report.issues.len());
                 } else {
-                    browse(&mut selection, key.code, report.items.len());
+                    match key.code {
+                        KeyCode::Char(' ') => {
+                            if let Some(index) = selection.selected().filter(|&index| {
+                                report.items.get(index).is_some_and(|item| {
+                                    item.selection_blocker(&report.selection_program).is_none()
+                                })
+                            }) && !marked.remove(&index)
+                            {
+                                marked.insert(index);
+                            }
+                        }
+                        KeyCode::Enter if !marked.is_empty() => {
+                            show_preview = true;
+                            detail_scroll = 0;
+                        }
+                        KeyCode::Enter => empty_preview = true,
+                        _ => browse(&mut selection, key.code, report.items.len()),
+                    }
                 }
             }
         }
     }
+}
+
+fn preview_items<'a>(report: &'a Report, marked: &BTreeSet<usize>) -> Vec<&'a Item> {
+    let selected = marked.iter().map(|&index| &report.items[index]);
+    let directories: BTreeSet<_> = selected
+        .clone()
+        .filter(|item| item.file_type.is_dir())
+        .map(|item| item.path.as_path())
+        .collect();
+    selected
+        .filter(|item| {
+            !item
+                .path
+                .ancestors()
+                .skip(1)
+                .any(|parent| directories.contains(parent))
+        })
+        .collect()
 }
 
 fn browse(selection: &mut ListState, key: KeyCode, len: usize) {
