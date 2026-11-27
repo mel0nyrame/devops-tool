@@ -1,3 +1,5 @@
+mod references;
+
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -14,6 +16,12 @@ pub enum ArtifactKind {
     ApplicationData,
     Preferences,
     Cache,
+    Configuration,
+    State,
+    Logs,
+    TemporaryData,
+    SharedConfiguration,
+    ExtensionSource,
 }
 
 pub enum BundleMatch {
@@ -35,6 +43,9 @@ pub enum Evidence {
         source: PathBuf,
         app_data_root: PathBuf,
     },
+    SharedReference {
+        matched_term: String,
+    },
 }
 
 pub struct Item {
@@ -49,6 +60,9 @@ impl Item {
     pub fn selection_blocker(&self, program: &MainProgram) -> Option<&'static str> {
         if self.file_type.is_symlink() {
             return Some("symbolic links cannot be selected");
+        }
+        if matches!(self.evidence, Evidence::SharedReference { .. }) {
+            return Some("a reference does not establish ownership of this file");
         }
         if !self.in_cleanup_scope {
             return Some("outside the cleanup scope");
@@ -74,6 +88,12 @@ impl ArtifactKind {
             Self::ApplicationData => "may contain retained user data",
             Self::Preferences => "may contain retained settings",
             Self::Cache => "may contain cached data the application would need to recreate",
+            Self::Configuration => "may contain retained settings",
+            Self::State => "may contain retained sessions or user data",
+            Self::Logs => "may contain retained activity records",
+            Self::TemporaryData => "contents and ownership have not been verified",
+            Self::SharedConfiguration => "may contain settings for another tool",
+            Self::ExtensionSource => "may contain code for another tool",
         }
     }
 }
@@ -83,6 +103,7 @@ pub enum CheckSource {
     Applications,
     BundleMetadata,
     UserData,
+    ReferenceContent,
 }
 
 pub struct CheckIssue {
@@ -168,6 +189,12 @@ impl ApplicationCheck {
             registration.as_deref(),
             &mut issues,
         );
+        items.extend(references::find(
+            locations,
+            name_query,
+            app.as_ref().and_then(Application::identifier),
+            &mut issues,
+        ));
         if let Some(app) = app {
             items.insert(
                 0,
@@ -297,23 +324,59 @@ fn find_artifacts(
     issues: &mut Vec<CheckIssue>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    for (relative, kind) in [
-        ("Library/Application Support", ArtifactKind::ApplicationData),
-        ("Library/Preferences", ArtifactKind::Preferences),
-        ("Library/Caches", ArtifactKind::Cache),
-    ] {
-        for entry in entries(
-            &locations.home.join(relative),
-            CheckSource::UserData,
-            issues,
-        ) {
+    let home_dirs = [
+        (
+            "Library/Application Support",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        (
+            "Library/Preferences",
+            ArtifactKind::Preferences,
+            Some(".plist"),
+        ),
+        ("Library/Caches", ArtifactKind::Cache, None),
+        ("Library/Containers", ArtifactKind::ApplicationData, None),
+        (
+            "Library/Group Containers",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        ("Library/Logs", ArtifactKind::Logs, None),
+        (
+            "Library/Saved Application State",
+            ArtifactKind::State,
+            Some(".savedState"),
+        ),
+        (".config", ArtifactKind::Configuration, None),
+        (".local/share", ArtifactKind::ApplicationData, None),
+        (".local/state", ArtifactKind::State, None),
+        (".cache", ArtifactKind::Cache, None),
+    ]
+    .into_iter()
+    .map(|(relative, kind, suffix)| (locations.home.join(relative), kind, suffix));
+    let temp_dir = match locations.user_temp_dir() {
+        Ok(path) => Some((path, ArtifactKind::TemporaryData, None)),
+        Err(error) => {
+            issues.push(CheckIssue {
+                source: CheckSource::UserData,
+                path: PathBuf::from("DARWIN_USER_TEMP_DIR"),
+                error,
+            });
+            None
+        }
+    };
+    for (directory, kind, suffix) in home_dirs.chain(temp_dir) {
+        let relative_root = directory
+            .strip_prefix(&locations.home)
+            .ok()
+            .and_then(Path::to_str);
+        for entry in entries(&directory, CheckSource::UserData, issues) {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let stem = if matches!(kind, ArtifactKind::Preferences) {
-                name.strip_suffix(".plist").unwrap_or(name)
-            } else {
-                name
-            };
+            let stem = suffix
+                .and_then(|suffix| name.strip_suffix(suffix))
+                .unwrap_or(name);
             let evidence = if let Some(app) = app.filter(|app| app.identifier() == Some(stem)) {
                 Evidence::BundleIdentifierFilename {
                     identifier: stem.to_owned(),
@@ -332,10 +395,12 @@ fn find_artifacts(
             };
             match entry.file_type() {
                 Ok(file_type) => {
-                    let in_cleanup_scope = match kind {
-                        ArtifactKind::ApplicationData | ArtifactKind::Cache => file_type.is_dir(),
-                        ArtifactKind::Preferences => name != stem && file_type.is_file(),
-                        ArtifactKind::ApplicationBundle => false,
+                    let in_cleanup_scope = match relative_root {
+                        Some("Library/Application Support" | "Library/Caches") => {
+                            file_type.is_dir()
+                        }
+                        Some("Library/Preferences") => name != stem && file_type.is_file(),
+                        _ => false,
                     };
                     let source =
                         registration.filter(|_| in_cleanup_scope && name_query == Some(stem));
@@ -354,7 +419,7 @@ fn find_artifacts(
                         in_cleanup_scope,
                     });
                     if let Some(source) = source
-                        && matches!(kind, ArtifactKind::ApplicationData)
+                        && relative_root == Some("Library/Application Support")
                     {
                         for child in entries(&path, CheckSource::UserData, issues) {
                             match child.file_type() {

@@ -269,6 +269,150 @@ class FixtureTests(IsolatedTests):
         session.quit()
         self.assertTrue(decoy.is_dir())
 
+    def test_searches_named_entries_in_the_additional_user_data_locations(self):
+        candidates = (
+            "Library/Containers/Scope Tool",
+            "Library/Group Containers/Scope Tool",
+            "Library/Logs/Scope Tool",
+            "Library/Saved Application State/Scope Tool.savedState",
+            ".config/Scope Tool",
+            ".local/share/Scope Tool",
+            ".local/state/Scope Tool",
+            ".cache/Scope Tool",
+        )
+        for relative in candidates:
+            candidate = self.home / relative
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text("isolated data")
+        session = self.start()
+        session.search("Scope Tool")
+        for index, relative in enumerate(candidates):
+            with self.subTest(location=relative):
+                if index:
+                    session.send(b"\x1b[B")
+                session.expect(re.escape(str(self.home / relative)))
+                session.expect("Filename match only; application ownership not established")
+        session.quit()
+        for relative in candidates:
+            self.assertEqual((self.home / relative).read_text(), "isolated data")
+
+    def test_searches_named_entries_in_the_isolated_private_temporary_directory(self):
+        candidate = self.root / "temp" / "org.lfd.temporary"
+        candidate.parent.mkdir()
+        candidate.write_text("isolated temporary data")
+        session = self.start()
+        session.search(candidate.name)
+        session.expect(re.escape(str(candidate)))
+        session.expect("Type: Temporary data")
+        session.expect("Filename match only; application ownership not established")
+        session.quit()
+        self.assertEqual(candidate.read_text(), "isolated temporary data")
+
+    def test_reports_references_in_only_the_listed_opencode_configs_without_editing_them(self):
+        sources = {
+            ".config/opencode/cli.json": '{"plugin":["scope-tool"],"other":"EXAMPLE-SETTING"}',
+            ".config/opencode/tui.jsonc": '{"plugin":["Scope-Tool"]}',
+            ".config/opencode/other.json": '{"plugin":["scope-tool"]}',
+            ".config/another-tool/cli.json": '{"plugin":["scope-tool"]}',
+            ".config/nested/scope-tool": "out of scope filename",
+            "Library/Application Support/Browser/scope-tool": "out of scope filename",
+            ".zsh_history": "scope-tool",
+        }
+        for relative, content in sources.items():
+            path = self.home / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        session = self.start()
+        session.search("scope-tool")
+        session.expect(re.escape(str(self.home / ".config/opencode/cli.json")))
+        session.expect("Shared reference: matched scope-tool in file contents")
+        session.expect("View only: a reference does not establish ownership")
+        self.assertNotIn("EXAMPLE-SETTING", session.screen.text())
+        self.assertNotIn("Filename match", session.screen.text())
+        for unexpected in ("other.json", "another-tool", ".zsh_history"):
+            self.assertNotIn(unexpected, session.screen.text())
+        self.assertNotRegex(session.screen.text(), r"scope-tool +│")
+        self.assertEqual(len(re.findall(r"(?m)^│[ >]*cli\.json +│", session.screen.text())), 1)
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(self.home / ".config/opencode/tui.jsonc")))
+        session.quit()
+        for relative, content in sources.items():
+            self.assertEqual((self.home / relative).read_text(), content)
+
+    def test_shared_references_and_group_container_stay_view_only_with_a_registered_id(self):
+        bundle_id = "org.lfd.shared"
+        self.register_absent_bundle(bundle_id)
+        container = self.home / "Library" / "Group Containers" / bundle_id
+        container.mkdir(parents=True)
+        shared = self.home / ".config" / "opencode" / "cli.json"
+        shared.parent.mkdir(parents=True)
+        contents = '{"plugin":["org.lfd.shared"],"unrelated":true}'
+        shared.write_text(contents)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(container)))
+        session.expect("View only: outside the cleanup scope")
+        session.send(b" \x1b[B")
+        session.expect(re.escape(str(shared)))
+        session.expect("View only: a reference does not establish ownership")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(shared.read_text(), contents)
+
+    def test_reports_references_in_direct_pi_sources_without_following_links(self):
+        extensions = self.home / ".pi/agent/extensions"
+        outside = self.root / "outside.js"
+        content = 'import "org.lfd.reference";'
+        outside.write_text(content)
+        sources = {
+            "entry.js": content,
+            "integration.ts": content,
+            "manifest.json": content,
+            "nested/index.ts": content,
+            "tools.ts/index.ts": content,
+            "other-id.ts": 'import "org.lfd.reference.extra";',
+            "oversize.js": content + " " * (1024 * 1024),
+        }
+        for relative, text in sources.items():
+            path = extensions / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        (extensions / "linked.ts").symlink_to(outside)
+        opencode = self.home / ".config/opencode"
+        target = self.root / "outside-config"
+        target.mkdir()
+        (target / "cli.json").write_text(content)
+        opencode.parent.mkdir()
+        opencode.symlink_to(target, target_is_directory=True)
+        session = self.start()
+        session.search("org.lfd.reference")
+        session.expect(re.escape(str(extensions / "entry.js")))
+        session.expect("Type: Extension source")
+        session.expect(r"Shared reference: matched org\.lfd\.reference in file contents")
+        session.expect("View only: a reference does not establish ownership")
+        session.expect("Uncheckable locations: 4")
+        for name in ("manifest.json", "index.ts", "other-id.ts", "oversize.js", "linked.ts", "cli.json"):
+            self.assertNotIn(name, session.screen.text())
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(extensions / "integration.ts")))
+        session.send(b"i")
+        session.expect(re.escape(str(opencode / "cli.json")))
+        session.expect("symbolic link not followed")
+        session.send(b"\x1b[B\x1b[B")
+        session.expect(re.escape(str(extensions / "linked.ts")))
+        session.expect("symbolic link not followed")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(extensions / "oversize.js")))
+        session.expect("reference source exceeds 1 MiB")
+        session.quit()
+        self.assertTrue((extensions / "linked.ts").is_symlink())
+        self.assertEqual(outside.read_text(), content)
+        self.assertEqual((target / "cli.json").read_text(), content)
+        for relative, text in sources.items():
+            self.assertEqual((extensions / relative).read_text(), text)
+
     def test_exact_bundle_id_uses_local_metadata_and_labels_related_items(self):
         apps = self.root / "System" / "Applications" / "Utilities"
         bundle = make_app(apps, "Internal.app", "Named Tool", "org.lfd.named", binary_plist=True)
@@ -452,6 +596,20 @@ class DefaultBuildTests(IsolatedTests):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("lfd does not take arguments", result.stderr)
+
+    def test_searches_the_native_macos_private_temporary_directory(self):
+        directory = subprocess.check_output(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], text=True,
+        ).strip()
+        candidate = tempfile.TemporaryDirectory(prefix="lfd-", dir=directory)
+        self.addCleanup(candidate.cleanup)
+        path = Path(candidate.name).resolve()
+        session = self.start()
+        session.search(path.name)
+        session.expect(re.escape(str(path)))
+        session.expect("Type: Temporary data")
+        session.quit()
+        self.assertTrue(path.is_dir())
 
     def test_ignores_fixture_override(self):
         bundle_id = "org.lfd.fixtureonly7938A51"

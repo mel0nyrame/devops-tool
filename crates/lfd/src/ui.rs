@@ -155,6 +155,7 @@ pub fn draw_issues(
             CheckSource::Applications => "Application directory",
             CheckSource::BundleMetadata => "Bundle metadata",
             CheckSource::UserData => "User data location",
+            CheckSource::ReferenceContent => "Shared reference source",
         };
         let reason = if issue.error.raw_os_error() == Some(libc::ELOOP) {
             format!("symbolic link not followed: {}", issue.error)
@@ -202,6 +203,12 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
         ArtifactKind::ApplicationData => "Application data",
         ArtifactKind::Preferences => "Preferences",
         ArtifactKind::Cache => "Cache",
+        ArtifactKind::Configuration => "Configuration",
+        ArtifactKind::State => "State",
+        ArtifactKind::Logs => "Logs",
+        ArtifactKind::TemporaryData => "Temporary data",
+        ArtifactKind::SharedConfiguration => "Shared configuration",
+        ArtifactKind::ExtensionSource => "Extension source",
     };
     let risk = item.kind.risk();
     let mut text = format!(
@@ -266,6 +273,10 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
                 ));
             }
         }
+        Evidence::SharedReference { matched_term } => text.push_str(&format!(
+            "Shared reference: matched {} in file contents.",
+            visible(matched_term)
+        )),
     }
     text
 }

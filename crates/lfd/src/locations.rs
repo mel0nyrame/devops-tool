@@ -19,6 +19,51 @@ impl Locations {
         ]
     }
 
+    pub fn user_temp_dir(&self) -> io::Result<PathBuf> {
+        #[cfg(feature = "test-fixtures")]
+        {
+            Ok(self.system_root.join("temp"))
+        }
+        #[cfg(not(feature = "test-fixtures"))]
+        {
+            use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+            let mut bytes = [0_u8; libc::PATH_MAX as usize];
+            // SAFETY: confstr may write at most bytes.len() bytes into this buffer.
+            let length = unsafe {
+                libc::confstr(
+                    libc::_CS_DARWIN_USER_TEMP_DIR,
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                )
+            };
+            if length == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if length > bytes.len() {
+                return Err(io::Error::other(
+                    "user temporary directory path is too long",
+                ));
+            }
+            let path = Path::new(OsStr::from_bytes(&bytes[..length - 1]));
+            if !path.is_absolute()
+                || path.parent().is_none()
+                || path
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+            {
+                return Err(io::Error::other(
+                    "macOS did not return a usable user temporary directory",
+                ));
+            }
+            // macOS can return its built-in /var alias. Do not resolve any other links.
+            Ok(match path.strip_prefix("/var") {
+                Ok(relative) => Path::new("/private/var").join(relative),
+                Err(_) => path.to_path_buf(),
+            })
+        }
+    }
+
     pub fn current() -> io::Result<Self> {
         #[cfg(feature = "test-fixtures")]
         {
