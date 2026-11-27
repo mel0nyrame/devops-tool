@@ -16,15 +16,31 @@ cargo run --locked --offline -p lfd
 - **残留候选**（Leftover candidates）：在已检查的应用目录中未找到匹配的应用包。这不能证明应用已卸载，也不能证明文件可以安全移除。
 - **可能匹配**（Possible matches）：未找到匹配的应用包，但应用检查未完成。仅用户数据位置检查失败不会改变应用检查状态。
 
-## 初始查找范围
+## 查找范围：应用与路径名称
 
 | 检查位置 | `lfd` 检查内容 |
 | --- | --- |
 | `/Applications`、`/Applications/Utilities`、`/System/Applications`、`/System/Applications/Utilities`、`~/Applications` | 直接子项中的 `.app` 目录。匹配去掉 `.app` 的目录名，或读取 `Contents/Info.plist`（最多 4 MiB）中的 `CFBundleDisplayName`、`CFBundleName`、`CFBundleIdentifier`。使用可读字段；缺少元数据时仍可按目录名匹配。不验证或启动应用的可执行文件。 |
-| `~/Library/Application Support`、`~/Library/Preferences`、`~/Library/Caches` | 仅匹配直接子项的名称，偏好设置文件名可去掉 `.plist` 后匹配。不打开用户数据文件，也不进入匹配的目录。 |
+| `~/Library/Application Support`、`~/Library/Containers`、`~/Library/Group Containers`、`~/Library/Caches`、`~/Library/Logs` | 仅匹配直接子项的名称。 |
+| `~/Library/Preferences`、`~/Library/Saved Application State` | 仅匹配直接子项的名称，分别去掉 `.plist` 和 `.savedState` 后匹配。 |
+| `~/.config`、`~/.local/share`、`~/.local/state`、`~/.cache` | 仅匹配直接子项的名称。 |
+| macOS 当前用户的专用临时目录（`getconf DARWIN_USER_TEMP_DIR`） | 仅匹配直接子项的名称。不使用 `$TMPDIR`，也不查找系统共用的临时目录。 |
 
-应用名称匹配不区分大小写；元数据中的 Bundle ID 必须精确匹配，包括大小写。若元数据中有精确匹配的 ID，则优先于名称匹配。文件可按本机元数据中的 Bundle ID 精确匹配，也可按文件名匹配查询。形如 Bundle ID 的点分查询要求精确匹配文件名。用户输入的标识符没有独立证据时只能产生文件名匹配，不能证明归属。
+应用名称匹配不区分大小写；元数据中的 Bundle ID 必须精确匹配，包括大小写。若元数据中有精确匹配的 ID，则优先于名称匹配。文件可按本机元数据中的 Bundle ID 精确匹配，也可按文件名匹配查询。形如 Bundle ID 的点分查询要求精确匹配文件名。仅凭用户输入的标识符不能证明归属。没有匹配元数据的路径名称命中仍只是文件名匹配。
 
-不沿符号链接进入目标。匹配的用户数据链接可能出现在结果中，但不检查链接目标。缺失的查找目录视为没有条目；读取错误和元数据检查失败单独报告。
+按路径名称查找时，不进入用户数据目录的子目录。匹配的用户数据符号链接可出现在结果中，但不检查链接目标。当前版本不检查独立命令、Homebrew 记录或 `.pkg` 收据，也不查找整个主目录、浏览器数据或 Shell 历史。
 
-初始范围不包括独立命令、Homebrew 记录、`.pkg` 收据或共享配置内容，也不会查找整个主目录。没有可清理位置：`lfd` 不勾选、移动、修改或删除任何项目。
+## 查找范围：共享引用内容
+
+除上文列出的应用包元数据外，`lfd` 仅读取以下来源的文件内容：
+
+| 来源 | 检查的文件 |
+| --- | --- |
+| OpenCode | 仅 `~/.config/opencode/cli.json` 和 `~/.config/opencode/tui.jsonc`。 |
+| Pi | `~/.pi/agent/extensions` 下扩展名为 `.js` 或 `.ts` 的直接子项普通文件。不进入嵌套扩展目录，也不读取其他类型的文件。 |
+
+`lfd` 在 UTF-8 文本中按词边界做字面匹配：应用名称不区分大小写，Bundle ID 必须精确匹配。不解析或执行这些文件。匹配也可能来自注释或偶然出现的文本，不一定是生效的引用。证据栏展示路径和匹配词，不展示文件正文。引用不能证明该文件归应用专用，因此结果仅供查看。
+
+`lfd` 不沿引用文件及其父目录中的符号链接进入目标。缺失的来源视为没有匹配；无法读取的文件、超过 1 MiB 的文件和其他检查失败单独报告，不视为检查成功但未找到匹配。
+
+没有可清理位置。找到名称或共享引用都不代表授权清理；`lfd` 不勾选、移动、修改或删除任何项目。

@@ -108,6 +108,7 @@ pub fn draw_issues(
             CheckSource::Applications => "Application directory",
             CheckSource::BundleMetadata => "Bundle metadata",
             CheckSource::UserData => "User data location",
+            CheckSource::ReferenceContent => "Shared reference source",
         };
         let reason = if issue.error.raw_os_error() == Some(libc::ELOOP) {
             format!("symbolic link not followed: {}", issue.error)
@@ -157,6 +158,18 @@ fn evidence(item: &Item) -> String {
         ArtifactKind::ApplicationData => ("Application data", "may contain retained user data"),
         ArtifactKind::Preferences => ("Preferences", "may contain retained settings"),
         ArtifactKind::Cache => ("Cache", "contents and ownership have not been verified"),
+        ArtifactKind::Configuration => ("Configuration", "may contain retained settings"),
+        ArtifactKind::State => ("State", "may contain retained sessions or user data"),
+        ArtifactKind::Logs => ("Logs", "may contain retained activity records"),
+        ArtifactKind::TemporaryData => (
+            "Temporary data",
+            "contents and ownership have not been verified",
+        ),
+        ArtifactKind::SharedConfiguration => (
+            "Shared configuration",
+            "may contain settings for another tool",
+        ),
+        ArtifactKind::ExtensionSource => ("Extension source", "may contain code for another tool"),
     };
     let mut text = format!(
         "{}\n\nType: {kind}\nRisk: {risk}\n\n",
@@ -197,6 +210,10 @@ fn evidence(item: &Item) -> String {
             "Filename matches the local CFBundleIdentifier: {}\nMetadata: {}",
             visible(identifier),
             display_path(source)
+        )),
+        Evidence::SharedReference { matched_term } => text.push_str(&format!(
+            "Shared reference: matched {} in file contents.\nView only: a reference does not establish ownership of this file.",
+            visible(matched_term)
         )),
     }
     text
