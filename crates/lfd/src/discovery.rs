@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -6,6 +7,7 @@ use std::{
 use crate::{
     bundle::{BundleMetadata, read_metadata},
     locations::{Locations, check_path},
+    receipt::{self, Receipt, ReceiptInspection},
 };
 
 #[derive(Clone, Copy)]
@@ -14,6 +16,7 @@ pub enum ArtifactKind {
     ApplicationData,
     Preferences,
     Cache,
+    PackageReceipt,
 }
 
 pub enum BundleMatch {
@@ -25,8 +28,20 @@ pub enum BundleMatch {
 
 pub enum Evidence {
     ApplicationBundle(Application),
+    PackageReceipt {
+        identifier: String,
+        matched_package_filename: Option<String>,
+    },
+    PackageReceiptPath {
+        identifier: String,
+        receipt: PathBuf,
+        verified_bundle_id: Option<String>,
+    },
     FilenameMatch,
-    BundleIdentifierFilename { identifier: String, source: PathBuf },
+    BundleIdentifierFilename {
+        identifier: String,
+        source: PathBuf,
+    },
 }
 
 pub struct Item {
@@ -41,6 +56,8 @@ pub enum CheckSource {
     Applications,
     BundleMetadata,
     UserData,
+    PackageReceipts,
+    PackageReceiptPaths,
 }
 
 pub struct CheckIssue {
@@ -77,41 +94,88 @@ impl Application {
     }
 }
 
-pub struct ApplicationCheck {
-    pub matches: Vec<Application>,
-    issues: Vec<CheckIssue>,
+pub enum Identity {
+    Application(Application),
+    PackageReceipt(Receipt),
 }
 
-impl ApplicationCheck {
-    pub fn run(locations: &Locations, query: &str) -> Self {
-        let mut issues = Vec::new();
-        let mut matches = find_applications(locations, query, &mut issues);
-        if matches
-            .iter()
-            .any(|app| matches!(app.matched_by, BundleMatch::Identifier))
-        {
-            matches.retain(|app| matches!(app.matched_by, BundleMatch::Identifier));
+impl Identity {
+    fn matches_exact_identifier(&self) -> bool {
+        match self {
+            Self::Application(app) => matches!(app.matched_by, BundleMatch::Identifier),
+            Self::PackageReceipt(receipt) => receipt.exact,
         }
-        Self { matches, issues }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Application(app) => &app.path,
+            Self::PackageReceipt(receipt) => &receipt.path,
+        }
+    }
+}
+
+pub struct Search {
+    pub matches: Vec<Identity>,
+    application_issues: Vec<CheckIssue>,
+    receipt_issues: Vec<CheckIssue>,
+}
+
+impl Search {
+    pub fn run(locations: &Locations, query: &str) -> Self {
+        let mut application_issues = Vec::new();
+        let mut receipt_issues = Vec::new();
+        let mut matches = find_applications(locations, query, &mut application_issues)
+            .into_iter()
+            .map(Identity::Application)
+            .chain(
+                receipt::find(locations, query, &mut receipt_issues)
+                    .into_iter()
+                    .map(Identity::PackageReceipt),
+            )
+            .collect::<Vec<_>>();
+        if matches.iter().any(Identity::matches_exact_identifier) {
+            matches.retain(Identity::matches_exact_identifier);
+        }
+        Self {
+            matches,
+            application_issues,
+            receipt_issues,
+        }
     }
 
     pub fn report(self, locations: &Locations, query: &str, selected: usize) -> Report {
         let ambiguous = self.matches.len() > 1;
-        let mut issues = self.issues;
-        let app = self.matches.into_iter().nth(selected);
-        let main_program = if app.is_some() {
-            MainProgram::Found
-        } else if issues.is_empty() {
-            MainProgram::NotFound
-        } else {
-            MainProgram::Incomplete
-        };
+        let identity = self.matches.into_iter().nth(selected);
         let name_query = (!ambiguous
-            && !app
+            && !identity
                 .as_ref()
-                .is_some_and(|app| matches!(app.matched_by, BundleMatch::Identifier)))
+                .is_some_and(Identity::matches_exact_identifier))
         .then_some(query);
-        let mut items = find_artifacts(locations, name_query, app.as_ref(), &mut issues);
+        let mut issues = self.application_issues;
+        let application_check_incomplete = !issues.is_empty();
+        issues.extend(self.receipt_issues);
+        let (receipt, app) = match identity {
+            Some(Identity::Application(app)) => (ReceiptInspection::default(), Some(app)),
+            Some(Identity::PackageReceipt(receipt)) => {
+                (receipt.inspect(locations, &mut issues), None)
+            }
+            None => (ReceiptInspection::default(), None),
+        };
+        let main_program = if receipt.application_check_incomplete {
+            MainProgram::Incomplete
+        } else if app.is_some() || receipt.application_found {
+            MainProgram::Found
+        } else if application_check_incomplete {
+            MainProgram::Incomplete
+        } else {
+            MainProgram::NotFound
+        };
+        let mut items = receipt.items;
+        let mut artifacts = find_artifacts(locations, name_query, app.as_ref(), &mut issues);
+        let recorded_paths: HashSet<_> = items.iter().map(|item| item.path.as_path()).collect();
+        artifacts.retain(|item| !recorded_paths.contains(item.path.as_path()));
+        items.extend(artifacts);
         if let Some(app) = app {
             items.insert(
                 0,
@@ -230,6 +294,15 @@ fn find_applications(
     apps
 }
 
+pub fn user_data_dirs(locations: &Locations) -> [(PathBuf, ArtifactKind); 3] {
+    [
+        ("Library/Application Support", ArtifactKind::ApplicationData),
+        ("Library/Preferences", ArtifactKind::Preferences),
+        ("Library/Caches", ArtifactKind::Cache),
+    ]
+    .map(|(relative, kind)| (locations.home.join(relative), kind))
+}
+
 fn find_artifacts(
     locations: &Locations,
     name_query: Option<&str>,
@@ -237,16 +310,8 @@ fn find_artifacts(
     issues: &mut Vec<CheckIssue>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    for (relative, kind) in [
-        ("Library/Application Support", ArtifactKind::ApplicationData),
-        ("Library/Preferences", ArtifactKind::Preferences),
-        ("Library/Caches", ArtifactKind::Cache),
-    ] {
-        for entry in entries(
-            &locations.home.join(relative),
-            CheckSource::UserData,
-            issues,
-        ) {
+    for (directory, kind) in user_data_dirs(locations) {
+        for entry in entries(&directory, CheckSource::UserData, issues) {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let stem = if matches!(kind, ArtifactKind::Preferences) {
@@ -298,11 +363,15 @@ fn looks_like_bundle_id(query: &str) -> bool {
         })
 }
 
-fn same_name(left: &str, right: &str) -> bool {
+pub fn same_name(left: &str, right: &str) -> bool {
     left.to_lowercase() == right.to_lowercase()
 }
 
-fn entries(path: &Path, source: CheckSource, issues: &mut Vec<CheckIssue>) -> Vec<fs::DirEntry> {
+pub fn entries(
+    path: &Path,
+    source: CheckSource,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<fs::DirEntry> {
     let entries = match check_path(path).and_then(|_| fs::read_dir(path)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),

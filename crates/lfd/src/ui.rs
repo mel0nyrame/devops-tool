@@ -8,43 +8,53 @@ use ratatui::{
 };
 
 use crate::discovery::{
-    Application, ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Item, MainProgram,
+    ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Identity, Item, MainProgram,
     Report,
 };
 
 pub fn draw_search(frame: &mut Frame, input: &str, error: &str) {
     let input = visible(input);
-    let text =
-        format!("Application name or Bundle ID:\n> {input}\n\n{error}\n\nEnter search / Esc quit");
+    let text = format!(
+        "Application name or Bundle ID or .pkg package ID:\n> {input}\n\n{error}\n\nEnter search / Esc quit"
+    );
     frame.render_widget(panel(text, " lfd · read-only inspection ", 0), frame.area());
 }
 
 pub fn draw_choices(
     frame: &mut Frame,
-    apps: &[Application],
+    identities: &[Identity],
     selection: &mut ListState,
     scroll: u16,
 ) {
     let [main, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(frame.area());
     let [left, right] = columns(main, 60);
-    let rows = apps.iter().map(|app| {
+    let rows = identities.iter().map(|identity| {
+        let (label, identifier) = identity_identifier(identity);
         ListItem::new(format!(
-            "{}\n{}\n",
-            visible(app.identifier().unwrap_or("Bundle ID unavailable")),
-            display_path(&app.path),
+            "{label}: {}\n{}\n",
+            visible(identifier),
+            display_path(identity.path()),
         ))
     });
     frame.render_stateful_widget(list(rows, " Choose one application "), left, selection);
-    if let Some(app) = selection.selected().and_then(|index| apps.get(index)) {
+    if let Some(identity) = selection.selected().and_then(|index| identities.get(index)) {
+        let (label, identifier) = identity_identifier(identity);
         let details = format!(
-            "Bundle ID: {}\n\n{}",
-            visible(app.identifier().unwrap_or("unavailable")),
-            display_path(&app.path)
+            "{label}: {}\n\n{}",
+            visible(identifier),
+            display_path(identity.path())
         );
-        frame.render_widget(panel(details, " Installation ", scroll), right);
+        frame.render_widget(panel(details, " Installation evidence ", scroll), right);
     }
-    frame.render_widget(Paragraph::new("↑/↓ browse · PgUp/PgDn details · Enter choose · q / Esc quit\nName-only artifacts are not assigned to either identity."), footer);
+    frame.render_widget(Paragraph::new("↑/↓ browse · PgUp/PgDn details · Enter choose · q / Esc quit\nName-only artifacts are not assigned to any identity."), footer);
+}
+
+fn identity_identifier(identity: &Identity) -> (&str, &str) {
+    match identity {
+        Identity::Application(app) => ("Bundle ID", app.identifier().unwrap_or("unavailable")),
+        Identity::PackageReceipt(receipt) => ("Package ID", &receipt.identifier),
+    }
 }
 
 pub fn draw_report(frame: &mut Frame, report: &Report, selection: &mut ListState, scroll: u16) {
@@ -108,6 +118,8 @@ pub fn draw_issues(
             CheckSource::Applications => "Application directory",
             CheckSource::BundleMetadata => "Bundle metadata",
             CheckSource::UserData => "User data location",
+            CheckSource::PackageReceipts => "Registered .pkg receipts",
+            CheckSource::PackageReceiptPaths => "Path recorded by a registered .pkg receipt",
         };
         let reason = if issue.error.raw_os_error() == Some(libc::ELOOP) {
             format!("symbolic link not followed: {}", issue.error)
@@ -157,6 +169,7 @@ fn evidence(item: &Item) -> String {
         ArtifactKind::ApplicationData => ("Application data", "may contain retained user data"),
         ArtifactKind::Preferences => ("Preferences", "may contain retained settings"),
         ArtifactKind::Cache => ("Cache", "contents and ownership have not been verified"),
+        ArtifactKind::PackageReceipt => ("Registered .pkg receipt", "historical evidence only"),
     };
     let mut text = format!(
         "{}\n\nType: {kind}\nRisk: {risk}\n\n",
@@ -187,6 +200,36 @@ fn evidence(item: &Item) -> String {
                 text.push_str(&format!(
                     "\nMetadata: {}",
                     display_path(&app.metadata_path())
+                ));
+            }
+        }
+        Evidence::PackageReceipt {
+            identifier,
+            matched_package_filename,
+        } => {
+            text.push_str(&format!("Package ID: {}\n", visible(identifier)));
+            if let Some(filename) = matched_package_filename {
+                text.push_str(&format!(
+                    "Matched registered installer filename: {}\n",
+                    visible(filename)
+                ));
+            }
+            text.push_str("View only: does not establish current ownership or installation.");
+        }
+        Evidence::PackageReceiptPath {
+            identifier,
+            receipt,
+            verified_bundle_id,
+        } => {
+            text.push_str(&format!(
+                "Recorded by the registered .pkg receipt for {}.\nReceipt: {}\nView only: the path exists, but the receipt does not establish current ownership or installation.",
+                visible(identifier),
+                display_path(receipt),
+            ));
+            if let Some(bundle_id) = verified_bundle_id {
+                text.push_str(&format!(
+                    "\nVerified current Bundle ID: {}",
+                    visible(bundle_id)
                 ));
             }
         }
