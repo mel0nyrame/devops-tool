@@ -29,6 +29,7 @@ Use `↑`/`↓` to browse the results on the left and read the full path, match 
 | `~/Library/Containers` | Immediate entry names. For a matching app container directory, `lfd` checks the specific macOS metadata file described under [Cleanup scope](#cleanup-scope). |
 | `~/Library/Preferences`, `~/Library/Saved Application State` | Immediate entry names only, with `.plist` and `.savedState` respectively removed before matching. |
 | `~/.config`, `~/.local/share`, `~/.local/state`, `~/.cache` | Immediate entry names only. |
+| `~/.<name>` | For an unambiguous name query without a leading dot, check the single directory formed by adding a dot to the name. The volume determines case matching. The directory is a view-only filename match. |
 | The current user's macOS private temporary directory (`getconf DARWIN_USER_TEMP_DIR`) | Immediate entry names only. `lfd` does not use `$TMPDIR` or search the system-wide temporary directory. |
 
 Application-name comparisons ignore case. Bundle IDs from metadata match exactly, including case. If an exact metadata ID is found, it takes precedence over name matches. An artifact can match the exact Bundle ID from local metadata or the query by filename. Dotted queries shaped like Bundle IDs require an exact filename match. A typed identifier alone does not establish ownership. A path-name hit without matching metadata remains a filename-only match.

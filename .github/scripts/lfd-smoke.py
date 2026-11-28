@@ -892,6 +892,34 @@ class FixtureTests(IsolatedTests):
         session.quit()
         self.assertEqual(candidate.read_text(), "isolated temporary data")
 
+    def test_finds_same_named_home_dot_directory_without_reading_its_contents(self):
+        candidate = self.home / ".zcode"
+        candidate.mkdir()
+        child = candidate / "private-settings"
+        child.write_text("synthetic application settings")
+        candidate.chmod(0)
+        self.addCleanup(candidate.chmod, 0o700)
+        (self.home / ".zcode-backup").mkdir()
+        (self.home / "zcode").mkdir()
+
+        session = self.start()
+        session.search("zcode")
+        session.expect("Leftover candidates")
+        session.expect(re.escape(str(candidate)))
+        session.expect("Type: Application data")
+        session.expect("Filename match only; application ownership not established")
+        session.expect("View only: outside the cleanup scope")
+        screen = session.screen.text()
+        self.assertNotIn(child.name, screen)
+        self.assertNotIn(".zcode-backup", screen)
+        self.assertNotRegex(screen, r"(?m)^│[ >]*zcode\s*│")
+        self.assertNotIn("Uncheckable locations", screen)
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        candidate.chmod(0o700)
+        self.assertEqual(child.read_text(), "synthetic application settings")
+
     def test_reports_references_in_only_the_listed_opencode_configs_without_editing_them(self):
         sources = {
             ".config/opencode/cli.json": '{"plugin":["scope-tool"],"other":"EXAMPLE-SETTING"}',

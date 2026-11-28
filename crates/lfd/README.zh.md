@@ -29,6 +29,7 @@ cargo run --locked --offline -p lfd
 | `~/Library/Containers` | 匹配直接子项的名称；对于匹配的应用容器目录，读取[清理范围](#清理范围)所列的 macOS 元数据文件。 |
 | `~/Library/Preferences`、`~/Library/Saved Application State` | 仅匹配直接子项的名称，分别去掉 `.plist` 和 `.savedState` 后匹配。 |
 | `~/.config`、`~/.local/share`、`~/.local/state`、`~/.cache` | 仅匹配直接子项的名称。 |
+| `~/.<名称>` | 名称查询只对应一个身份或未找到身份时，如果名称不以点开头，就在名称前加点，并检查这一个目录。大小写按所在卷的规则匹配。结果只供查看，证据为文件名匹配。 |
 | macOS 当前用户的专用临时目录（`getconf DARWIN_USER_TEMP_DIR`） | 仅匹配直接子项的名称。不使用 `$TMPDIR`，也不查找系统共用的临时目录。 |
 
 应用名称匹配不区分大小写；元数据中的 Bundle ID 必须精确匹配，包括大小写。若元数据中有精确匹配的 ID，则优先于名称匹配。文件可按本机元数据中的 Bundle ID 精确匹配，也可按文件名匹配查询。形如 Bundle ID 的点分查询要求精确匹配文件名。仅凭用户输入的标识符不能证明归属。没有匹配元数据的路径名称命中仍只是文件名匹配。

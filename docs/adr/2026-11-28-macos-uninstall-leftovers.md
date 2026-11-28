@@ -33,6 +33,8 @@ The maintainer also selected these discovery and cleanup rules:
 - Before moving each confirmed path, recheck main-program status, the account, and the identity, type, ownership, and location of the container, its metadata, and its ancestor directories without following links. Skip the item and report why if it was replaced, became a symbolic link, or cannot be verified. Do not apply the old confirmation to the new object.
 - Move confirmed paths to the account's private Trash on the same volume without overwriting. If a move cannot be verified or fails, leave the original item in place and report the reason. Do not request elevated privileges or fall back to permanent deletion.
 
+Some applications keep data in a hidden directory directly under the home directory. For an unambiguous name query, `lfd` checks the single corresponding `~/.<name>` directory without listing the home directory or opening the matching directory. The match is view-only filename evidence. This keeps the check bounded to the application name and avoids inspecting its data.
+
 The [tool README](../../crates/lfd/README.md) lists the discovery roots, reference sources, and cleanup roots. The command name does not select a distribution package name.
 
 ## Alternatives

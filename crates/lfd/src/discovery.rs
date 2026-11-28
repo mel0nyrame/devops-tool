@@ -729,6 +729,22 @@ fn find_artifacts(
 ) -> Vec<Item> {
     let home = &locations.home;
     let mut items = Vec::new();
+    if let Some(name) =
+        name_query.filter(|name| !name.starts_with('.') && !looks_like_bundle_id(name))
+    {
+        let path = home.join(format!(".{name}"));
+        if let Some(metadata) = checked_metadata(&path, CheckSource::UserData, issues)
+            && metadata.is_dir()
+        {
+            items.push(Item {
+                path,
+                kind: ArtifactKind::ApplicationData,
+                evidence: Evidence::FilenameMatch,
+                file_type: metadata.file_type(),
+                in_cleanup_scope: false,
+            });
+        }
+    }
     for UserDataDirectory { path, kind, suffix } in data_dirs {
         let relative_root = path.strip_prefix(home).ok().and_then(Path::to_str);
         for entry in entries(path, CheckSource::UserData, issues) {
