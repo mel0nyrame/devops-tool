@@ -15,7 +15,7 @@ use crate::discovery::{
 pub fn draw_search(frame: &mut Frame, input: &str, error: &str) {
     let input = visible(input);
     let text = format!(
-        "Application name or Bundle ID or .pkg package ID:\n> {input}\n\n{error}\n\nEnter search / Esc quit"
+        "Application name or Bundle ID, command name, Homebrew package name, or .pkg package ID:\n> {input}\n\n{error}\n\nEnter search / Esc quit"
     );
     frame.render_widget(panel(text, " lfd · read-only inspection ", 0), frame.area());
 }
@@ -30,30 +30,59 @@ pub fn draw_choices(
         Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(frame.area());
     let [left, right] = columns(main, 60);
     let rows = identities.iter().map(|identity| {
-        let (label, identifier) = identity_identifier(identity);
         ListItem::new(format!(
-            "{label}: {}\n{}\n",
-            visible(identifier),
+            "{}\n{}\n",
+            identity_label(identity),
             display_path(identity.path()),
         ))
     });
     frame.render_stateful_widget(list(rows, " Choose one application "), left, selection);
     if let Some(identity) = selection.selected().and_then(|index| identities.get(index)) {
-        let (label, identifier) = identity_identifier(identity);
-        let details = format!(
-            "{label}: {}\n\n{}",
-            visible(identifier),
+        let mut details = format!(
+            "{}\n\n{}",
+            identity_label(identity),
             display_path(identity.path())
         );
-        frame.render_widget(panel(details, " Installation evidence ", scroll), right);
+        if let Identity::Homebrew(package) = identity {
+            if let Some(app) = package.single_application() {
+                details.push_str(&format!(
+                    "\n\nBundle ID: {}\n{}",
+                    visible(app.identifier().unwrap_or("unavailable")),
+                    display_path(&app.path)
+                ));
+            }
+        }
+        frame.render_widget(panel(details, " Installation ", scroll), right);
     }
-    frame.render_widget(Paragraph::new("↑/↓ browse · PgUp/PgDn details · Enter choose · q / Esc quit\nName-only artifacts are not assigned to any identity."), footer);
+    frame.render_widget(Paragraph::new("↑/↓ browse · PgUp/PgDn details · Enter choose · q / Esc quit\nName-only artifacts are not assigned to a selected identity."), footer);
 }
 
-fn identity_identifier(identity: &Identity) -> (&str, &str) {
+fn identity_label(identity: &Identity) -> String {
     match identity {
-        Identity::Application(app) => ("Bundle ID", app.identifier().unwrap_or("unavailable")),
-        Identity::PackageReceipt(receipt) => ("Package ID", &receipt.identifier),
+        Identity::Application(app) => {
+            format!(
+                "Bundle ID: {}",
+                visible(app.identifier().unwrap_or("unavailable"))
+            )
+        }
+        Identity::PackageReceipt(receipt) => {
+            format!("Package ID: {}", visible(&receipt.identifier))
+        }
+        Identity::Command(item) => format!(
+            "Executable: {}",
+            visible(&item.path.file_name().unwrap_or_default().to_string_lossy())
+        ),
+        Identity::Homebrew(package) => format!(
+            "Homebrew {}: {}",
+            package.kind.name(),
+            visible(
+                &package
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        ),
     }
 }
 
@@ -83,7 +112,7 @@ pub fn draw_report(
     let [left, right] = columns(main, 32);
     let (status, title) = match report.main_program {
         MainProgram::Found => (
-            "Main program found in the checked application directories.",
+            "Main program found in the checked locations.",
             " Related items ",
         ),
         MainProgram::NotFound => (
@@ -164,6 +193,8 @@ pub fn draw_issues(
         let source = match issue.source {
             CheckSource::Applications => "Application directory",
             CheckSource::BundleMetadata => "Bundle metadata",
+            CheckSource::PathCommand => "PATH command check",
+            CheckSource::Homebrew => "Homebrew location or record",
             CheckSource::UserData => "User data location",
             CheckSource::PackageReceipts => "Registered .pkg receipts",
             CheckSource::PackageReceiptPaths => "Path recorded by a registered .pkg receipt",
@@ -212,6 +243,8 @@ fn panel(text: String, title: &str, scroll: u16) -> Paragraph<'_> {
 fn evidence(item: &Item, program: &MainProgram) -> String {
     let kind = match item.kind {
         ArtifactKind::ApplicationBundle => "Application bundle",
+        ArtifactKind::StandaloneCommand => "Executable command",
+        ArtifactKind::HomebrewRecord => "Homebrew record",
         ArtifactKind::ApplicationData => "Application data",
         ArtifactKind::Preferences => "Preferences",
         ArtifactKind::Cache => "Cache",
@@ -238,11 +271,12 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
     }
     match &item.evidence {
         Evidence::ApplicationBundle(app) => {
-            let field = match app.matched_by {
+            let field = match &app.matched_by {
                 BundleMatch::DirectoryName => "bundle directory name",
                 BundleMatch::DisplayName => "CFBundleDisplayName",
                 BundleMatch::Name => "CFBundleName",
                 BundleMatch::Identifier => "CFBundleIdentifier",
+                BundleMatch::HomebrewCask(_) => "Homebrew cask app path",
             };
             text.push_str(&format!("Matched on {field}."));
             if let Some(metadata) = &app.metadata {
@@ -260,7 +294,22 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
                     display_path(&app.metadata_path())
                 ));
             }
+            if let BundleMatch::HomebrewCask(record) = &app.matched_by {
+                text.push_str(&format!("\nLocal Homebrew installation record:\n{}\nHomebrew installation path: view-only.", display_path(record)));
+            }
         }
+        Evidence::PathCommand => text.push_str("Executable name matches the query in PATH."),
+        Evidence::HomebrewRecord(kind) => text.push_str(&format!(
+            "Homebrew {} installation record.\nHomebrew global location: view-only.",
+            kind.name()
+        )),
+        Evidence::HomebrewProgram(record) => text.push_str(&format!(
+            "Local Homebrew installation record:\n{}\nHomebrew global location: view-only.",
+            display_path(record),
+        )),
+        Evidence::UnrecordedHomebrewCommand => text.push_str(
+            "Executable name matches the query. No local Homebrew installation record;\napplication ownership not established.\nHomebrew global location: view-only.",
+        ),
         Evidence::PackageReceipt {
             identifier,
             matched_package_filename,

@@ -1,32 +1,14 @@
-use std::{
-    fs::OpenOptions,
-    io::{self, Read},
-    os::unix::fs::OpenOptionsExt,
-    path::Path,
-    ptr,
-};
+use std::{io, path::Path, ptr};
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_foundation::{
     NSData, NSDictionary, NSPropertyListMutabilityOptions, NSPropertyListSerialization, NSString,
 };
 
-pub fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
-    const MAX_PLIST_SIZE: u64 = 4 * 1024 * 1024;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::other("property list is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_PLIST_SIZE + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_PLIST_SIZE {
-        return Err(io::Error::other("property list exceeds 4 MiB"));
-    }
+use crate::locations::read_metadata_file;
 
-    Ok(bytes)
+pub fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    read_metadata_file(path, "property list").map(|(bytes, _)| bytes)
 }
 
 pub fn read_dictionary(path: &Path) -> io::Result<Retained<NSDictionary>> {

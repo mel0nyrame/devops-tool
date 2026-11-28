@@ -2,25 +2,27 @@
 
 [简体中文](README.zh.md)
 
-`lfd` is a read-only terminal tool for checking whether an application's `.app` bundle is present and inspecting possible artifacts. Run it from the workspace root in an interactive macOS terminal:
+`lfd` is a read-only terminal tool for checking whether an application's main program is present and inspecting possible artifacts. Run it from the workspace root in an interactive macOS terminal:
 
 ```sh
 cargo run --locked --offline -p lfd
 ```
 
-Enter an application name, exact Bundle ID, or exact `.pkg` package ID, then press `Enter`. `lfd` does not take command-line arguments or accept paths as queries. If several application identities match, choose one with `↑`/`↓` and `Enter`; filename-only artifacts are not assigned to any identity.
+Enter an application name, exact Bundle ID, command name, exact Homebrew package name, or exact `.pkg` package ID, then press `Enter`. `lfd` does not take command-line arguments or accept paths as queries. If distinct identities match, choose one with `↑`/`↓` and `Enter`; filename-only artifacts are not assigned to the chosen identity.
 
 Use `↑`/`↓` to browse the results on the left and read the full path, match evidence, type, and risk on the right. `PgUp`/`PgDn` scroll the evidence. Press `i` if locations could not be checked to inspect their paths and errors separately. Press `q` or `Esc` to quit from results; press `Esc` to quit from the search prompt.
 
-- **Related items**: a matching app bundle was found in the checked application directories.
-- **Leftover candidates**: no matching app bundle was found in those directories. This does not prove that the application was uninstalled or that its files are safe to remove.
-- **Possible matches**: the required application check could not be completed. A problem checking a data location or reading a receipt alone does not change the application check status.
+- **Related items**: a matching main program was found in the checked locations.
+- **Leftover candidates**: no matching main program was found in the checked locations. This does not prove that the application was uninstalled or that its files are safe to remove.
+- **Possible matches**: no matching main program was found, but a required main-program check could not be completed. A problem checking a user data location or reading a `.pkg` receipt alone does not change this status.
 
-## Search scope: applications and entry names
+## Search scope: main programs and entry names
 
 | Checked location | What `lfd` checks |
 | --- | --- |
 | `/Applications`, `/Applications/Utilities`, `/System/Applications`, `/System/Applications/Utilities`, `~/Applications` | Immediate `.app` directories. `lfd` matches the directory name without `.app`, or reads `Contents/Info.plist` (up to 4 MiB) for `CFBundleDisplayName`, `CFBundleName`, and `CFBundleIdentifier`. Readable fields are used; missing metadata does not prevent a directory name match. It does not verify or launch the executable. |
+| Directories on `PATH` | The entry with the queried command name. A command must be a regular file with at least one execute bit; `lfd` does not inspect or launch it. |
+| `/opt/homebrew` and `/usr/local`: `Cellar/<formula>/<version>` and `Caskroom/<cask>` | Exact package name. For formulae, `lfd` reads `INSTALL_RECEIPT.json` and checks immediate `bin` and `sbin` executables in each version. Without a usable record, only a same-named executable is reported, as name evidence. For casks, `lfd` reads `.metadata/INSTALL_RECEIPT.json` and checks its `app` targets under the application directories (default `/Applications`), falling back to the staged bundle in that version's Caskroom directory, or its `binary` sources within that directory. Records are limited to 4 MiB each; other artifact types and paths outside those roots are not inspected. |
 | `~/Library/Application Support`, `~/Library/Containers`, `~/Library/Group Containers`, `~/Library/Caches`, `~/Library/Logs` | Immediate entry names only. |
 | `~/Library/Preferences`, `~/Library/Saved Application State` | Immediate entry names only, with `.plist` and `.savedState` respectively removed before matching. |
 | `~/.config`, `~/.local/share`, `~/.local/state`, `~/.cache` | Immediate entry names only. |
@@ -28,7 +30,9 @@ Use `↑`/`↓` to browse the results on the left and read the full path, match 
 
 Application-name comparisons ignore case. Bundle IDs from metadata match exactly, including case. If an exact metadata ID is found, it takes precedence over name matches. An artifact can match the exact Bundle ID from local metadata or the query by filename. Dotted queries shaped like Bundle IDs require an exact filename match. A typed identifier alone does not establish ownership. A path-name hit without matching metadata remains a filename-only match.
 
-Name lookup does not descend into user data directories. Matching user-data symbolic links can appear in the list, but their targets are not inspected. This version does not check standalone commands or Homebrew records. It does not search the whole home directory, browser data, or shell history.
+An exact Bundle ID from app metadata narrows the main-program check to applications. Without an exact Bundle ID or registered `.pkg` package ID match, `lfd` checks both applications and `PATH` for name matches, plus the standard Homebrew locations for the exact package name. A Homebrew record can identify the program to check, but does not by itself prove the program still exists. Missing records do not stop other checks. Homebrew global locations are view-only; `lfd` does not invoke Homebrew, access the network, or run scripts.
+
+Name lookup does not descend into user data directories or follow symbolic links, including command links on `PATH`. Matching user-data links can appear in the list with their targets uninspected. Missing search directories have no entries; read errors and failed metadata checks are reported separately. `lfd` does not search the whole home directory, browser data, or shell history.
 
 ## Registered `.pkg` receipts
 
@@ -38,7 +42,7 @@ Only currently existing recorded paths within the search scope above can appear 
 
 ## Search scope: shared reference contents
 
-Apart from the app bundle metadata and receipt data listed above, `lfd` reads contents only from these sources:
+Apart from the app bundle metadata, Homebrew records, and `.pkg` receipt data listed above, `lfd` reads contents only from these sources:
 
 | Source | Files checked |
 | --- | --- |
@@ -51,7 +55,7 @@ Apart from the app bundle metadata and receipt data listed above, `lfd` reads co
 
 ## Cleanup preview
 
-The normal build leaves all items view-only: the application-directory search and receipt leads do not complete the required main-program checks for cleanup. A matching name, a typed identifier, a receipt alone, a shared reference, or a standalone symbolic link does not make an item eligible.
+The normal build leaves all items view-only: discovery alone does not verify all the main-program and ownership evidence required for cleanup. A matching name, a typed identifier, a receipt alone, a shared reference, or a standalone symbolic link does not make an item eligible.
 
 In isolated preview verification, a complete main-program check that finds no program, plus independent Bundle ID registration evidence, can make these exact current-user paths selectable:
 

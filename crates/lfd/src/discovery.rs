@@ -3,11 +3,13 @@ mod references;
 use std::{
     collections::HashSet,
     fs, io,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
 use crate::{
     bundle::{BundleMetadata, read_metadata},
+    homebrew::{self, HomebrewKind, HomebrewPackage},
     locations::{Locations, check_path},
     receipt::{self, Receipt, ReceiptInspection},
 };
@@ -15,6 +17,8 @@ use crate::{
 #[derive(Clone, Copy)]
 pub enum ArtifactKind {
     ApplicationBundle,
+    StandaloneCommand,
+    HomebrewRecord,
     ApplicationData,
     Preferences,
     Cache,
@@ -32,10 +36,15 @@ pub enum BundleMatch {
     DisplayName,
     Name,
     Identifier,
+    HomebrewCask(PathBuf),
 }
 
 pub enum Evidence {
     ApplicationBundle(Application),
+    PathCommand,
+    HomebrewRecord(HomebrewKind),
+    HomebrewProgram(PathBuf),
+    UnrecordedHomebrewCommand,
     PackageReceipt {
         identifier: String,
         matched_package_filename: Option<String>,
@@ -103,6 +112,8 @@ impl ArtifactKind {
     pub fn risk(self) -> &'static str {
         match self {
             Self::ApplicationBundle => "may contain an installed application",
+            Self::StandaloneCommand => "not launched or inspected",
+            Self::HomebrewRecord => "installation evidence, not proof of a current main program",
             Self::ApplicationData => "may contain retained user data",
             Self::Preferences => "may contain retained settings",
             Self::Cache => "may contain cached data the application would need to recreate",
@@ -121,6 +132,8 @@ impl ArtifactKind {
 pub enum CheckSource {
     Applications,
     BundleMetadata,
+    PathCommand,
+    Homebrew,
     UserData,
     PackageReceipts,
     PackageReceiptPaths,
@@ -139,6 +152,18 @@ pub enum MainProgram {
     Incomplete,
 }
 
+impl MainProgram {
+    pub fn from_check(found: bool, incomplete: bool) -> Self {
+        if found {
+            Self::Found
+        } else if incomplete {
+            Self::Incomplete
+        } else {
+            Self::NotFound
+        }
+    }
+}
+
 pub struct Report {
     pub main_program: MainProgram,
     pub selection_program: MainProgram,
@@ -150,7 +175,7 @@ pub struct Application {
     pub path: PathBuf,
     pub metadata: Option<BundleMetadata>,
     pub matched_by: BundleMatch,
-    file_type: fs::FileType,
+    pub(crate) file_type: fs::FileType,
 }
 
 impl Application {
@@ -161,10 +186,22 @@ impl Application {
     pub fn identifier(&self) -> Option<&str> {
         self.metadata.as_ref()?.identifier.as_deref()
     }
+
+    pub fn into_item(self) -> Item {
+        Item {
+            path: self.path.clone(),
+            kind: ArtifactKind::ApplicationBundle,
+            file_type: self.file_type,
+            in_cleanup_scope: false,
+            evidence: Evidence::ApplicationBundle(self),
+        }
+    }
 }
 
 pub enum Identity {
     Application(Application),
+    Command(Item),
+    Homebrew(HomebrewPackage),
     PackageReceipt(Receipt),
 }
 
@@ -173,12 +210,15 @@ impl Identity {
         match self {
             Self::Application(app) => matches!(app.matched_by, BundleMatch::Identifier),
             Self::PackageReceipt(receipt) => receipt.exact,
+            _ => false,
         }
     }
 
     pub fn path(&self) -> &Path {
         match self {
             Self::Application(app) => &app.path,
+            Self::Command(item) => &item.path,
+            Self::Homebrew(package) => &package.path,
             Self::PackageReceipt(receipt) => &receipt.path,
         }
     }
@@ -186,15 +226,15 @@ impl Identity {
 
 pub struct Search {
     pub matches: Vec<Identity>,
-    application_issues: Vec<CheckIssue>,
+    program_issues: Vec<CheckIssue>,
     receipt_issues: Vec<CheckIssue>,
 }
 
 impl Search {
     pub fn run(locations: &Locations, query: &str) -> Self {
-        let mut application_issues = Vec::new();
+        let mut program_issues = Vec::new();
         let mut receipt_issues = Vec::new();
-        let mut matches = find_applications(locations, query, &mut application_issues)
+        let mut matches: Vec<_> = find_applications(locations, query, &mut program_issues)
             .into_iter()
             .map(Identity::Application)
             .chain(
@@ -202,13 +242,36 @@ impl Search {
                     .into_iter()
                     .map(Identity::PackageReceipt),
             )
-            .collect::<Vec<_>>();
+            .collect();
         if matches.iter().any(Identity::matches_exact_identifier) {
             matches.retain(Identity::matches_exact_identifier);
+        } else {
+            let brew = homebrew::find_packages(locations, query, &mut program_issues);
+            let commands = find_path_commands(locations, query, &mut program_issues);
+            let belongs_to_package = |path: &Path| {
+                brew.packages
+                    .iter()
+                    .any(|package| package.items.iter().any(|item| item.path == path))
+            };
+            matches.retain(|identity| !belongs_to_package(identity.path()));
+            matches.extend(
+                commands
+                    .into_iter()
+                    .filter(|command| {
+                        !belongs_to_package(&command.path)
+                            && !brew
+                                .unrecorded_commands
+                                .iter()
+                                .any(|other| command.path == other.path)
+                    })
+                    .map(Identity::Command),
+            );
+            matches.extend(brew.unrecorded_commands.into_iter().map(Identity::Command));
+            matches.extend(brew.packages.into_iter().map(Identity::Homebrew));
         }
         Self {
             matches,
-            application_issues,
+            program_issues,
             receipt_issues,
         }
     }
@@ -221,26 +284,33 @@ impl Search {
                 .as_ref()
                 .is_some_and(Identity::matches_exact_identifier))
         .then_some(query);
-        let mut issues = self.application_issues;
-        let application_check_incomplete = !issues.is_empty();
+        let mut issues = self.program_issues;
+        let main_program_check_incomplete = !issues.is_empty();
+        let path_check_incomplete = issues
+            .iter()
+            .any(|issue| matches!(issue.source, CheckSource::PathCommand));
         issues.extend(self.receipt_issues);
         let data_dirs = user_data_dirs(locations, &mut issues);
-        let (receipt, app) = match identity {
-            Some(Identity::Application(app)) => (ReceiptInspection::default(), Some(app)),
-            Some(Identity::PackageReceipt(receipt)) => {
-                (receipt.inspect(locations, &data_dirs, &mut issues), None)
+        let mut receipt = ReceiptInspection::default();
+        let main_program = match &identity {
+            Some(Identity::Homebrew(package)) => MainProgram::from_check(
+                package.program_found,
+                package.check_incomplete || (package.checks_path && path_check_incomplete),
+            ),
+            Some(Identity::PackageReceipt(package)) => {
+                receipt = package.inspect(locations, &data_dirs, &mut issues);
+                receipt.application_check.unwrap_or_else(|| {
+                    MainProgram::from_check(false, main_program_check_incomplete)
+                })
             }
-            None => (ReceiptInspection::default(), None),
+            Some(_) => MainProgram::Found,
+            None => MainProgram::from_check(false, main_program_check_incomplete),
         };
-        let main_program = receipt.application_check.unwrap_or_else(|| {
-            if app.is_some() {
-                MainProgram::Found
-            } else if application_check_incomplete {
-                MainProgram::Incomplete
-            } else {
-                MainProgram::NotFound
-            }
-        });
+        let app = match &identity {
+            Some(Identity::Application(app)) => Some(app),
+            Some(Identity::Homebrew(package)) => package.single_application(),
+            _ => None,
+        };
         let (registration, supplemental) = selection_evidence(locations, query);
         let selection_program = match (&main_program, supplemental) {
             (MainProgram::Found, _) | (_, MainProgram::Found) => MainProgram::Found,
@@ -252,7 +322,7 @@ impl Search {
             &data_dirs,
             &locations.home,
             name_query,
-            app.as_ref(),
+            app,
             registration.as_deref(),
             &mut issues,
         );
@@ -262,21 +332,16 @@ impl Search {
         items.extend(references::find(
             locations,
             name_query,
-            app.as_ref().and_then(Application::identifier),
+            app.and_then(Application::identifier),
             &mut issues,
         ));
-        if let Some(app) = app {
-            items.insert(
-                0,
-                Item {
-                    path: app.path.clone(),
-                    kind: ArtifactKind::ApplicationBundle,
-                    file_type: app.file_type,
-                    in_cleanup_scope: false,
-                    evidence: Evidence::ApplicationBundle(app),
-                },
-            );
-        }
+        let program_items = match identity {
+            Some(Identity::Application(app)) => vec![app.into_item()],
+            Some(Identity::Command(command)) => vec![command],
+            Some(Identity::Homebrew(package)) => package.items,
+            Some(Identity::PackageReceipt(_)) | None => Vec::new(),
+        };
+        items.splice(..0, program_items);
         Report {
             main_program,
             selection_program,
@@ -284,6 +349,67 @@ impl Search {
             issues,
         }
     }
+}
+
+fn find_path_commands(
+    locations: &Locations,
+    query: &str,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Item> {
+    let mut commands: Vec<Item> = Vec::new();
+    for directory in locations.path_dirs() {
+        let path = if directory.is_absolute() {
+            directory.join(query)
+        } else {
+            match std::env::current_dir() {
+                Ok(current) => current.join(directory).join(query),
+                Err(error) => {
+                    issues.push(CheckIssue {
+                        source: CheckSource::PathCommand,
+                        path: directory,
+                        error,
+                    });
+                    continue;
+                }
+            }
+        };
+        if let Some(metadata) = checked_metadata(&path, CheckSource::PathCommand, issues)
+            && is_executable(&metadata)
+            && !commands.iter().any(|item| item.path == path)
+        {
+            commands.push(Item {
+                path,
+                kind: ArtifactKind::StandaloneCommand,
+                evidence: Evidence::PathCommand,
+                file_type: metadata.file_type(),
+                in_cleanup_scope: false,
+            });
+        }
+    }
+    commands
+}
+
+pub fn checked_metadata(
+    path: &Path,
+    source: CheckSource,
+    issues: &mut Vec<CheckIssue>,
+) -> Option<fs::Metadata> {
+    match check_path(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            issues.push(CheckIssue {
+                source,
+                path: path.to_path_buf(),
+                error,
+            });
+            None
+        }
+    }
+}
+
+pub fn is_executable(metadata: &fs::Metadata) -> bool {
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
 fn find_applications(
@@ -324,30 +450,7 @@ fn find_applications(
                     continue;
                 }
             };
-            let metadata_path = path.join("Contents/Info.plist");
-            let metadata = match read_metadata(&metadata_path) {
-                Ok(parsed) => {
-                    if !parsed.invalid_keys.is_empty() {
-                        issues.push(CheckIssue {
-                            source: CheckSource::BundleMetadata,
-                            path: metadata_path,
-                            error: io::Error::other(format!(
-                                "Expected strings in {}",
-                                parsed.invalid_keys.join(", ")
-                            )),
-                        });
-                    }
-                    Some(parsed.metadata)
-                }
-                Err(error) => {
-                    issues.push(CheckIssue {
-                        source: CheckSource::BundleMetadata,
-                        path: metadata_path,
-                        error,
-                    });
-                    None
-                }
-            };
+            let metadata = bundle_metadata(&path, issues);
             let names = [
                 (
                     metadata
@@ -384,6 +487,31 @@ fn find_applications(
         }
     }
     apps
+}
+
+pub fn bundle_metadata(path: &Path, issues: &mut Vec<CheckIssue>) -> Option<BundleMetadata> {
+    let metadata_path = path.join("Contents/Info.plist");
+    let error = match read_metadata(&metadata_path) {
+        Ok(parsed) if parsed.invalid_keys.is_empty() => return Some(parsed.metadata),
+        Ok(parsed) => {
+            issues.push(CheckIssue {
+                source: CheckSource::BundleMetadata,
+                path: metadata_path,
+                error: io::Error::other(format!(
+                    "Expected strings in {}",
+                    parsed.invalid_keys.join(", ")
+                )),
+            });
+            return Some(parsed.metadata);
+        }
+        Err(error) => error,
+    };
+    issues.push(CheckIssue {
+        source: CheckSource::BundleMetadata,
+        path: metadata_path,
+        error,
+    });
+    None
 }
 
 pub struct UserDataDirectory {

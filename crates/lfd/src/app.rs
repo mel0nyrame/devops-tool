@@ -91,10 +91,9 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                 KeyCode::Enter => {
                     let query = input.trim();
                     if query.is_empty() {
-                        error =
-                            "Enter a non-empty application name or Bundle ID or .pkg package ID.";
+                        error = "Enter a non-empty application name or Bundle ID, command name, or package name or ID.";
                     } else if query.contains(['/', '\\']) || matches!(query, "." | ".." | "~") {
-                        error = "Enter an application name or Bundle ID or .pkg package ID, not a path.";
+                        error = "Enter a name or exact identifier, not a path.";
                     } else {
                         let check = Search::run(locations, query);
                         view = if check.matches.len() > 1 {
