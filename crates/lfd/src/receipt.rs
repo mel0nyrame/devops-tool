@@ -10,7 +10,8 @@ use std::{
 use crate::{
     bundle::parse_metadata,
     discovery::{
-        ArtifactKind, CheckIssue, CheckSource, Evidence, Item, entries, same_name, user_data_dirs,
+        ArtifactKind, CheckIssue, CheckSource, Evidence, Item, UserDataDirectory, entries,
+        same_name,
     },
     locations::{Locations, check_path},
     plist,
@@ -96,6 +97,7 @@ impl Receipt {
     pub fn inspect(
         &self,
         locations: &Locations,
+        data_dirs: &[UserDataDirectory],
         issues: &mut Vec<CheckIssue>,
     ) -> ReceiptInspection {
         let mut inspection = ReceiptInspection::default();
@@ -109,7 +111,7 @@ impl Receipt {
             symbolic_link: false,
         });
         let bom = self.path.with_extension("bom");
-        let paths = match scope_paths(locations, self.prefix.as_deref(), &bom) {
+        let paths = match scope_paths(locations, data_dirs, self.prefix.as_deref(), &bom) {
             Ok(paths) => paths,
             Err(error) => {
                 issues.push(CheckIssue {
@@ -228,6 +230,7 @@ fn bom_checksum(bytes: &[u8]) -> u32 {
 
 fn scope_paths(
     locations: &Locations,
+    data_dirs: &[UserDataDirectory],
     prefix: Option<&str>,
     bom: &Path,
 ) -> io::Result<Vec<RecordedPath>> {
@@ -255,7 +258,6 @@ fn scope_paths(
         .system_root
         .join(prefix.strip_prefix("/").unwrap_or(prefix));
     let application_dirs = locations.application_dirs();
-    let data_dirs = user_data_dirs(locations);
 
     // Give lsbom the already opened receipt; it cannot reopen a replacement path.
     let mut lsbom = Command::new("/usr/bin/lsbom")
@@ -289,11 +291,11 @@ fn scope_paths(
         let path = root.join(relative);
         if is_application_path(&path, &application_dirs) {
             paths.insert(path, ArtifactKind::ApplicationBundle);
-        } else if let Some((_, kind)) = data_dirs
+        } else if let Some(directory) = data_dirs
             .iter()
-            .find(|(directory, _)| Some(directory.as_path()) == path.parent())
+            .find(|directory| Some(directory.path.as_path()) == path.parent())
         {
-            paths.insert(path, *kind);
+            paths.insert(path, directory.kind);
         } else if path.ends_with("Contents/Info.plist")
             && let Some(bundle) = path.ancestors().nth(2)
             && is_application_path(bundle, &application_dirs)

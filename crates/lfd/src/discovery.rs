@@ -1,3 +1,5 @@
+mod references;
+
 use std::{
     collections::HashSet,
     fs, io,
@@ -17,6 +19,12 @@ pub enum ArtifactKind {
     Preferences,
     Cache,
     PackageReceipt,
+    Configuration,
+    State,
+    Logs,
+    TemporaryData,
+    SharedConfiguration,
+    ExtensionSource,
 }
 
 pub enum BundleMatch {
@@ -42,6 +50,9 @@ pub enum Evidence {
         identifier: String,
         source: PathBuf,
     },
+    SharedReference {
+        matched_term: String,
+    },
 }
 
 pub struct Item {
@@ -58,6 +69,7 @@ pub enum CheckSource {
     UserData,
     PackageReceipts,
     PackageReceiptPaths,
+    ReferenceContent,
 }
 
 pub struct CheckIssue {
@@ -155,10 +167,11 @@ impl Search {
         let mut issues = self.application_issues;
         let application_check_incomplete = !issues.is_empty();
         issues.extend(self.receipt_issues);
+        let data_dirs = user_data_dirs(locations, &mut issues);
         let (receipt, app) = match identity {
             Some(Identity::Application(app)) => (ReceiptInspection::default(), Some(app)),
             Some(Identity::PackageReceipt(receipt)) => {
-                (receipt.inspect(locations, &mut issues), None)
+                (receipt.inspect(locations, &data_dirs, &mut issues), None)
             }
             None => (ReceiptInspection::default(), None),
         };
@@ -172,10 +185,16 @@ impl Search {
             MainProgram::NotFound
         };
         let mut items = receipt.items;
-        let mut artifacts = find_artifacts(locations, name_query, app.as_ref(), &mut issues);
+        let mut artifacts = find_artifacts(&data_dirs, name_query, app.as_ref(), &mut issues);
         let recorded_paths: HashSet<_> = items.iter().map(|item| item.path.as_path()).collect();
         artifacts.retain(|item| !recorded_paths.contains(item.path.as_path()));
         items.extend(artifacts);
+        items.extend(references::find(
+            locations,
+            name_query,
+            app.as_ref().and_then(Application::identifier),
+            &mut issues,
+        ));
         if let Some(app) = app {
             items.insert(
                 0,
@@ -294,31 +313,75 @@ fn find_applications(
     apps
 }
 
-pub fn user_data_dirs(locations: &Locations) -> [(PathBuf, ArtifactKind); 3] {
-    [
-        ("Library/Application Support", ArtifactKind::ApplicationData),
-        ("Library/Preferences", ArtifactKind::Preferences),
-        ("Library/Caches", ArtifactKind::Cache),
+pub struct UserDataDirectory {
+    pub path: PathBuf,
+    pub kind: ArtifactKind,
+    suffix: Option<&'static str>,
+}
+
+fn user_data_dirs(locations: &Locations, issues: &mut Vec<CheckIssue>) -> Vec<UserDataDirectory> {
+    let home_dirs = [
+        (
+            "Library/Application Support",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        (
+            "Library/Preferences",
+            ArtifactKind::Preferences,
+            Some(".plist"),
+        ),
+        ("Library/Caches", ArtifactKind::Cache, None),
+        ("Library/Containers", ArtifactKind::ApplicationData, None),
+        (
+            "Library/Group Containers",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        ("Library/Logs", ArtifactKind::Logs, None),
+        (
+            "Library/Saved Application State",
+            ArtifactKind::State,
+            Some(".savedState"),
+        ),
+        (".config", ArtifactKind::Configuration, None),
+        (".local/share", ArtifactKind::ApplicationData, None),
+        (".local/state", ArtifactKind::State, None),
+        (".cache", ArtifactKind::Cache, None),
     ]
-    .map(|(relative, kind)| (locations.home.join(relative), kind))
+    .into_iter()
+    .map(|(relative, kind, suffix)| (locations.home.join(relative), kind, suffix));
+    let temp_dir = match locations.user_temp_dir() {
+        Ok(path) => Some((path, ArtifactKind::TemporaryData, None)),
+        Err(error) => {
+            issues.push(CheckIssue {
+                source: CheckSource::UserData,
+                path: PathBuf::from("DARWIN_USER_TEMP_DIR"),
+                error,
+            });
+            None
+        }
+    };
+    home_dirs
+        .chain(temp_dir)
+        .map(|(path, kind, suffix)| UserDataDirectory { path, kind, suffix })
+        .collect()
 }
 
 fn find_artifacts(
-    locations: &Locations,
+    data_dirs: &[UserDataDirectory],
     name_query: Option<&str>,
     app: Option<&Application>,
     issues: &mut Vec<CheckIssue>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    for (directory, kind) in user_data_dirs(locations) {
-        for entry in entries(&directory, CheckSource::UserData, issues) {
+    for UserDataDirectory { path, kind, suffix } in data_dirs {
+        for entry in entries(path, CheckSource::UserData, issues) {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let stem = if matches!(kind, ArtifactKind::Preferences) {
-                name.strip_suffix(".plist").unwrap_or(name)
-            } else {
-                name
-            };
+            let stem = suffix
+                .and_then(|suffix| name.strip_suffix(suffix))
+                .unwrap_or(name);
             let evidence = if let Some(app) = app.filter(|app| app.identifier() == Some(stem)) {
                 Evidence::BundleIdentifierFilename {
                     identifier: stem.to_owned(),
@@ -338,7 +401,7 @@ fn find_artifacts(
             match entry.file_type() {
                 Ok(file_type) => items.push(Item {
                     path: entry.path(),
-                    kind,
+                    kind: *kind,
                     evidence,
                     symbolic_link: file_type.is_symlink(),
                 }),
