@@ -288,7 +288,7 @@ fn display_path(path: &Path) -> String {
 fn visible(text: &str) -> String {
     let mut escaped = String::new();
     for ch in text.chars() {
-        if ch.is_control() {
+        if ch.is_control() || ch == '\\' {
             escaped.extend(ch.escape_default());
         } else {
             escaped.push(ch);

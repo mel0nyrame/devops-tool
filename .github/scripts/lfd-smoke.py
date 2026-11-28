@@ -193,6 +193,28 @@ class FixtureTests(IsolatedTests):
         session.quit()
         self.assertEqual(child.read_text(), "retained")
 
+    def test_preview_distinguishes_literal_backslashes_from_escaped_newlines(self):
+        bundle_id = "org.lfd.escaped"
+        self.register_absent_bundle(bundle_id)
+        directory = self.home / "Library" / "Application Support" / bundle_id
+        directory.mkdir(parents=True)
+        newline = directory / "session\nbackup"
+        backslash = directory / r"session\nbackup"
+        newline.write_text("newline data")
+        backslash.write_text("backslash data")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Selected: 0")
+        session.send(b"\x1b[B \x1b[B \r")
+        session.expect("Cleanup preview")
+        session.expect(re.escape(str(backslash)) + r" +│")
+        session.expect(re.escape(str(directory / r"session\\nbackup")) + r" +│")
+        session.send(b"\r")
+        session.expect("Selected: 2")
+        session.quit()
+        self.assertEqual(newline.read_text(), "newline data")
+        self.assertEqual(backslash.read_text(), "backslash data")
+
     def test_incomplete_required_checks_keep_verified_data_view_only(self):
         bundle_id = "org.lfd.partial"
         records = self.register_absent_bundle(bundle_id)
@@ -417,6 +439,8 @@ class FixtureTests(IsolatedTests):
         apps = self.root / "System" / "Applications" / "Utilities"
         bundle = make_app(apps, "Internal.app", "Named Tool", "org.lfd.named", binary_plist=True)
         make_app(apps, "Other.app", "Other Tool", "org.lfd.named.extra")
+        # Negative supplemental results must not override an app found on disk.
+        self.register_absent_bundle("org.lfd.named")
         preference = self.home / "Library" / "Preferences" / "org.lfd.named.plist"
         preference.parent.mkdir(parents=True)
         preference.write_text("isolated preferences")
