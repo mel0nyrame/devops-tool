@@ -4,6 +4,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, widgets::ListState};
 
 use crate::{
+    cleanup::{self, Outcome},
     discovery::{Item, Report, Search},
     locations::Locations,
     ui,
@@ -15,6 +16,12 @@ enum View {
     Results(Report),
 }
 
+#[derive(Clone, Copy)]
+enum ReviewAction {
+    Cancel,
+    MoveToTrash,
+}
+
 pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<()> {
     let mut view = View::Search;
     let mut input = String::new();
@@ -22,7 +29,8 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
     let mut selection = ListState::default().with_selected(Some(0));
     let mut issue_selection = ListState::default().with_selected(Some(0));
     let mut show_issues = false;
-    let mut show_preview = false;
+    let mut review = None;
+    let mut outcomes: Option<Vec<Outcome>> = None;
     let mut empty_preview = false;
     let mut marked = BTreeSet::<usize>::new();
     let mut detail_scroll = 0_u16;
@@ -32,9 +40,17 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             View::Choose(check) => {
                 ui::draw_choices(frame, &check.matches, &mut selection, detail_scroll)
             }
-            View::Results(report) if show_preview => {
-                ui::draw_preview(frame, &preview_items(report, &marked), detail_scroll)
-            }
+            View::Results(_) if outcomes.is_some() => ui::draw_outcomes(
+                frame,
+                outcomes.as_deref().unwrap_or_default(),
+                detail_scroll,
+            ),
+            View::Results(report) if review.is_some() => ui::draw_preview(
+                frame,
+                &preview_items(report, &marked),
+                matches!(review, Some(ReviewAction::MoveToTrash)),
+                detail_scroll,
+            ),
             View::Results(report) if show_issues => {
                 ui::draw_issues(frame, &report.issues, &mut issue_selection, detail_scroll)
             }
@@ -53,10 +69,28 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
         if key.kind == KeyEventKind::Release {
             continue;
         }
-        if show_preview && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-            show_preview = false;
-            detail_scroll = 0;
-            continue;
+        if let (Some(action), View::Results(report)) = (review, &view) {
+            match key.code {
+                KeyCode::Esc => {
+                    review = None;
+                    detail_scroll = 0;
+                    continue;
+                }
+                KeyCode::Left => review = Some(ReviewAction::Cancel),
+                KeyCode::Right => review = Some(ReviewAction::MoveToTrash),
+                KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                    if matches!(action, ReviewAction::MoveToTrash) {
+                        outcomes = Some(cleanup::move_reviewed(
+                            locations,
+                            &preview_items(report, &marked),
+                        ));
+                    }
+                    review = None;
+                    detail_scroll = 0;
+                    continue;
+                }
+                _ => {}
+            }
         }
         if key.code == KeyCode::Esc
             || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -71,7 +105,7 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             KeyCode::Up | KeyCode::Down => detail_scroll = 0,
             _ => {}
         }
-        if show_preview {
+        if review.is_some() || outcomes.is_some() {
             continue;
         }
         match view {
@@ -130,16 +164,17 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                     match key.code {
                         KeyCode::Char(' ') => {
                             if let Some(index) = selection.selected().filter(|&index| {
-                                report.items.get(index).is_some_and(|item| {
-                                    item.selection_blocker(&report.selection_program).is_none()
-                                })
+                                report
+                                    .items
+                                    .get(index)
+                                    .is_some_and(|item| item.selection_blocker(report).is_none())
                             }) && !marked.remove(&index)
                             {
                                 marked.insert(index);
                             }
                         }
                         KeyCode::Enter if !marked.is_empty() => {
-                            show_preview = true;
+                            review = Some(ReviewAction::Cancel);
                             detail_scroll = 0;
                         }
                         KeyCode::Enter => empty_preview = true,
@@ -152,7 +187,10 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
 }
 
 fn preview_items<'a>(report: &'a Report, marked: &BTreeSet<usize>) -> Vec<&'a Item> {
-    let selected = marked.iter().map(|&index| &report.items[index]);
+    let selected = marked
+        .iter()
+        .map(|&index| &report.items[index])
+        .filter(|item| item.selection_blocker(report).is_none());
     let directories: BTreeSet<_> = selected
         .clone()
         .filter(|item| item.file_type.is_dir())

@@ -3,7 +3,7 @@ name = "lfd"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Read-only macOS uninstall leftover inspection"
+description = "macOS uninstall leftover inspection and selective cleanup"
 license = "MIT"
 
 [features]

@@ -151,6 +151,448 @@ class IsolatedTests(unittest.TestCase):
         return records
 
 
+CONTAINER_METADATA = ".com.apple.containermanagerd.metadata.plist"
+
+
+def make_container(home, bundle_id, *, root="Containers"):
+    container = home / "Library" / root / bundle_id
+    container.mkdir(parents=True)
+    (container / CONTAINER_METADATA).write_bytes(plistlib.dumps(
+        {"MCMMetadataIdentifier": bundle_id}, fmt=plistlib.FMT_BINARY,
+    ))
+    return container
+
+
+class ContainerTests(IsolatedTests):
+    def test_moves_an_exact_metadata_matched_container_without_registration(self):
+        bundle_id = "org.lfd.container"
+        container = make_container(self.home, bundle_id)
+        (container / "data").write_text("isolated data")
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(container)))
+        session.expect("Container metadata matches the directory Bundle ID")
+        session.expect("Space to select")
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+        session.expect("Includes all descendants")
+        session.send(b"\x1b[C\r")
+        session.expect("Moved to Trash")
+        session.quit()
+        self.assertFalse(container.exists())
+        self.assertEqual((trash / bundle_id / "data").read_text(), "isolated data")
+
+    def test_an_exact_receipt_does_not_hide_an_existing_path_command(self):
+        bundle_id = "org.lfd.pathreceipt"
+        container = make_container(self.home, bundle_id)
+        receipt = make_receipt(self.root, bundle_id, "Path receipt", "/Applications")
+        make_receipt_bom(receipt, ["Absent.app"])
+        command = self.root / "usr" / "local" / "bin" / bundle_id
+        command.parent.mkdir(parents=True)
+        command.write_text("not launched")
+        command.chmod(0o700)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Registered .pkg receipt")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: main program found")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(command.read_text(), "not launched")
+
+    def test_skips_a_container_when_an_app_appears_after_review(self):
+        bundle_id = "org.lfd.appappears"
+        container = make_container(self.home, bundle_id)
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Space to select")
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+        make_app(self.root / "Applications", "Live.app", "Live", bundle_id)
+        session.send(b"\x1b[C\r")
+        session.expect("Skipped: main program found")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(list(trash.iterdir()), [])
+
+    def test_unidentified_app_makes_the_required_bundle_id_check_incomplete(self):
+        bundle_id = "org.lfd.unknownapp"
+        container = make_container(self.home, bundle_id)
+        app = self.root / "Applications" / "Unknown.app" / "Contents" / "Info.plist"
+        app.parent.mkdir(parents=True)
+        app.write_bytes(plistlib.dumps({"CFBundleName": "Unknown"}))
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Main program check incomplete")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: required main program checks incomplete")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+
+    def test_an_unverifiable_homebrew_installation_keeps_a_container_view_only(self):
+        bundle_id = "org.lfd.brewunknown"
+        container = make_container(self.home, bundle_id)
+        stage = self.root / "opt" / "homebrew" / "Caskroom" / bundle_id / "1.0"
+        app = make_app(stage, "Staged.app", "Staged", "org.lfd.other")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Main program check incomplete")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: required main program checks incomplete")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(app.is_dir())
+        self.assertTrue(container.is_dir())
+
+    def test_missing_mismatched_unreadable_or_linked_metadata_is_not_ownership(self):
+        cases = {
+            "missing": "No such file or directory",
+            "mismatched": "metadata Bundle ID does not match",
+            "unreadable": "Permission denied",
+            "linked": "symbolic link not followed",
+        }
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        for case, reason in cases.items():
+            with self.subTest(metadata=case):
+                bundle_id = f"org.lfd.{case}"
+                container = make_container(self.home, bundle_id)
+                metadata = container / CONTAINER_METADATA
+                if case == "missing":
+                    metadata.unlink()
+                elif case == "mismatched":
+                    metadata.write_bytes(plistlib.dumps({"MCMMetadataIdentifier": bundle_id.upper()}))
+                elif case == "unreadable":
+                    metadata.chmod(0)
+                else:
+                    target = self.root / "uninspected-metadata.plist"
+                    metadata.rename(target)
+                    source = target.read_bytes()
+                    metadata.symlink_to(target)
+                session = self.start()
+                session.search(bundle_id)
+                session.expect(re.escape(str(container)))
+                session.expect("View only: container ownership could not be verified")
+                session.expect(reason)
+                session.send(b" \r")
+                session.expect("Selected: 0 · Nothing selected for preview")
+                session.quit()
+                self.assertTrue(container.is_dir())
+                if case == "linked":
+                    self.assertEqual(target.read_bytes(), source)
+        self.assertEqual(list(trash.iterdir()), [])
+
+    def test_metadata_does_not_authorize_other_data_or_shared_containers(self):
+        bundle_id = "org.lfd.narrow"
+        container = make_container(self.home, bundle_id)
+        shared = make_container(self.home, bundle_id, root="Group Containers")
+        library = self.home / "Library"
+        unrelated = [
+            library / "Application Support" / bundle_id,
+            library / "Preferences" / f"{bundle_id}.plist",
+            library / "Caches" / bundle_id,
+        ]
+        for path in unrelated:
+            if path.suffix == ".plist":
+                path.parent.mkdir()
+                path.write_text("retained")
+            else:
+                path.mkdir(parents=True)
+                (path / "data").write_text("retained")
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        session = self.start()
+        session.search(bundle_id)
+        for path in unrelated:
+            session.expect(re.escape(str(path)))
+            session.expect("View only")
+            session.send(b" \x1b[B")
+        session.expect(re.escape(str(container)))
+        session.expect("Selected: 0")
+        session.send(b" \x1b[B")
+        session.expect(re.escape(str(shared)))
+        session.expect("View only: outside the cleanup scope")
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+        for path in [*unrelated, shared]:
+            self.assertNotIn(str(path), session.screen.text())
+        session.send(b"\x1b[C\r")
+        session.expect("Moved to Trash")
+        session.quit()
+        self.assertEqual(list(trash.iterdir()), [trash / bundle_id])
+        self.assertFalse(container.exists())
+        self.assertTrue(shared.is_dir())
+        for path in unrelated:
+            data = path if path.suffix == ".plist" else path / "data"
+            self.assertEqual(data.read_text(), "retained")
+
+    def test_rechecks_container_metadata_content_and_identity_after_review(self):
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        for change in ("content", "identity"):
+            with self.subTest(change=change):
+                bundle_id = f"org.lfd.changed{change}"
+                container = make_container(self.home, bundle_id)
+                metadata = container / CONTAINER_METADATA
+                session = self.start()
+                session.search(bundle_id)
+                session.expect("Space to select")
+                session.send(b" \r")
+                session.expect("Cleanup preview")
+                if change == "content":
+                    metadata.write_bytes(plistlib.dumps({"MCMMetadataIdentifier": "org.lfd.changed"}))
+                    reason = "metadata Bundle ID does not match"
+                else:
+                    original = self.root / "original-metadata.plist"
+                    metadata.rename(original)
+                    metadata.write_bytes(original.read_bytes())
+                    reason = "container metadata identity changed"
+                session.send(b"\x1b[C\r")
+                session.expect(f"Skipped:.*{reason}")
+                session.quit()
+                self.assertTrue(metadata.is_file())
+        self.assertEqual(list(trash.iterdir()), [])
+
+    def test_an_unverifiable_receipt_path_does_not_hide_a_verified_live_app(self):
+        bundle_id = "org.lfd.pkgactive"
+        container = make_container(self.home, bundle_id)
+        receipt = make_receipt(self.root, bundle_id, "Installer", "/Applications")
+        apps = self.root / "Applications"
+        kept = make_app(apps, "Active.app", "Active", "org.lfd.appsource")
+        replaced = make_app(apps, "Replaced.app", "Replaced", "org.lfd.oldsource")
+        subprocess.run([
+            "/usr/bin/mkbom", str(apps), str(receipt.with_suffix(".bom")),
+        ], check=True)
+        (replaced / "Contents" / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": "org.lfd.unrelated",
+        }))
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Related items")
+        session.expect("Registered .pkg receipt")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(kept)))
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: main program found")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+
+
+class TrashTests(IsolatedTests):
+    def test_confirm_moves_only_the_reviewed_path_to_trash(self):
+        bundle_id = "org.lfd.trash"
+        self.register_absent_bundle(bundle_id)
+        candidate = self.home / "Library" / "Preferences" / f"{bundle_id}.plist"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text("selected settings")
+        unselected = self.home / "Library" / "Caches" / bundle_id
+        unselected.mkdir(parents=True)
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+
+        other_home = self.root / "env-home"
+        other_trash = other_home / ".Trash"
+        other_trash.mkdir(mode=0o700, parents=True)
+        session = Session(BINARY, other_home, self.root)
+        self.addCleanup(session.close)
+        session.search(bundle_id)
+        session.expect(re.escape(str(candidate)))
+        session.send(b"\r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.send(b" \r")
+        session.expect(r"\[ Cancel \]")
+        session.send(b"\r")
+        session.expect(r"Selected: 1 · .*Enter preview")
+        self.assertEqual(candidate.read_text(), "selected settings")
+        self.assertEqual(list(trash.iterdir()), [])
+
+        session.send(b"\r")
+        session.expect(r"\[ Cancel \]")
+        session.send(b"\x1b[C")
+        session.expect(r"\[ Move to Trash \]")
+        self.assertEqual(candidate.read_text(), "selected settings")
+        session.send(b"\r")
+        session.expect("Cleanup results")
+        session.expect("Moved to Trash")
+        session.expect(re.escape(str(candidate)))
+        session.quit()
+        self.assertFalse(candidate.exists())
+        self.assertEqual((trash / candidate.name).read_text(), "selected settings")
+        self.assertEqual(list(other_trash.iterdir()), [])
+        self.assertTrue(unselected.is_dir())
+
+    def test_reports_a_replaced_path_separately_from_trash_unavailable(self):
+        bundle_id = "org.lfd.outcomes"
+        self.register_absent_bundle(bundle_id)
+        preference = self.home / "Library" / "Preferences" / f"{bundle_id}.plist"
+        preference.parent.mkdir(parents=True)
+        preference.write_text("reviewed settings")
+        cache = self.home / "Library" / "Caches" / bundle_id
+        cache.mkdir(parents=True)
+
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(preference)))
+        session.send(b" \x1b[B \r")
+        session.expect("Cleanup preview")
+        session.expect(re.escape(str(cache)))
+        original = self.root / "original.plist"
+        preference.rename(original)
+        preference.write_text("replacement settings")
+        session.send(b"\x1b[C\r")
+        session.expect("Cleanup results")
+        session.expect("Skipped:.*object identity or type changed")
+        session.expect("Failed: could not verify Trash")
+        session.quit()
+        self.assertEqual(original.read_text(), "reviewed settings")
+        self.assertEqual(preference.read_text(), "replacement settings")
+        self.assertTrue(cache.is_dir())
+
+    def test_skips_a_source_replaced_by_a_symlink_at_the_leaf_or_ancestor(self):
+        for location in ("leaf", "ancestor"):
+            with self.subTest(location=location):
+                bundle_id = f"org.lfd.{location}link"
+                self.register_absent_bundle(bundle_id)
+                caches = self.home / "Library" / "Caches"
+                caches.mkdir(parents=True)
+                cache = caches / bundle_id
+                cache.mkdir()
+                (cache / "keep").write_text("original")
+                (self.home / ".Trash").mkdir(mode=0o700, exist_ok=True)
+                session = self.start()
+                session.search(bundle_id)
+                session.expect(re.escape(str(cache)))
+                session.send(b" \r")
+                session.expect("Cleanup preview")
+
+                replaced = cache if location == "leaf" else caches
+                target = self.root / f"{location}-original"
+                replaced.rename(target)
+                replaced.symlink_to(target, target_is_directory=True)
+                session.send(b"\x1b[C\r")
+                session.expect("Cleanup results")
+                session.expect("Skipped:.*symbolic link not followed")
+                session.quit()
+                self.assertEqual(replaced.readlink(), target)
+                original_file = target / "keep" if location == "leaf" else target / bundle_id / "keep"
+                self.assertEqual(original_file.read_text(), "original")
+                self.assertFalse((self.home / ".Trash" / bundle_id).exists())
+                replaced.unlink()
+                if location == "leaf":
+                    caches.rmdir()
+
+    def test_skips_the_same_file_when_an_intermediate_directory_is_replaced(self):
+        bundle_id = "org.lfd.reparented"
+        self.register_absent_bundle(bundle_id)
+        preferences = self.home / "Library" / "Preferences"
+        preferences.mkdir(parents=True)
+        candidate = preferences / f"{bundle_id}.plist"
+        candidate.write_text("reviewed file")
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(candidate)))
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+        old_preferences = self.root / "old-preferences"
+        preferences.rename(old_preferences)
+        preferences.mkdir()
+        os.link(old_preferences / candidate.name, candidate)
+        session.send(b"\x1b[C\r")
+        session.expect("Skipped:.*cleanup directory identity changed")
+        session.quit()
+        self.assertEqual(candidate.read_text(), "reviewed file")
+        self.assertFalse((trash / candidate.name).exists())
+
+    def test_moves_one_reviewed_directory_with_descendants_without_touching_link_targets(self):
+        bundle_id = "org.lfd.trashdir"
+        self.register_absent_bundle(bundle_id)
+        directory = self.home / "Library" / "Application Support" / bundle_id
+        directory.mkdir(parents=True)
+        data = directory / "data"
+        data.write_text("retained data")
+        outside = self.root / "outside"
+        outside.write_text("outside data")
+        (directory / "linked").symlink_to(outside)
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(directory)))
+        session.send(b" \x1b[B \r")
+        session.expect("Cleanup preview")
+        session.expect("Includes all descendants")
+        self.assertNotIn(str(data), session.screen.text())
+        session.send(b"\x1b[C\r")
+        session.expect("Moved to Trash")
+        self.assertNotIn(str(data), session.screen.text())
+        self.assertNotIn("Skipped:", session.screen.text())
+        session.quit()
+        self.assertFalse(directory.exists())
+        self.assertEqual((trash / bundle_id / data.name).read_text(), "retained data")
+        self.assertEqual((trash / bundle_id / "linked").readlink(), outside)
+        self.assertEqual(outside.read_text(), "outside data")
+
+    def test_rejects_a_trash_symlink_without_touching_its_target(self):
+        bundle_id = "org.lfd.trashlink"
+        self.register_absent_bundle(bundle_id)
+        candidate = self.home / "Library" / "Caches" / bundle_id
+        candidate.mkdir(parents=True)
+        (candidate / "data").write_text("reviewed data")
+        target = self.root / "outside-trash"
+        target.mkdir(mode=0o700)
+        trash = self.home / ".Trash"
+        trash.symlink_to(target, target_is_directory=True)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(candidate)))
+        session.send(b" \r")
+        session.expect(r"\[ Cancel \]")
+        session.send(b"\x1b[C\r")
+        session.expect("Failed: could not verify Trash: symbolic link not followed")
+        session.expect(re.escape(str(candidate)))
+        session.quit()
+        self.assertEqual((candidate / "data").read_text(), "reviewed data")
+        self.assertEqual(trash.readlink(), target)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_trash_name_collision_leaves_both_items_in_place(self):
+        bundle_id = "org.lfd.collision"
+        self.register_absent_bundle(bundle_id)
+        candidate = self.home / "Library" / "Preferences" / f"{bundle_id}.plist"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text("reviewed settings")
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        existing = trash / candidate.name
+        existing.write_text("already in Trash")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(candidate)))
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+        session.send(b"\x1b[C\r")
+        session.expect("Failed: File exists")
+        session.expect(re.escape(str(candidate)))
+        session.quit()
+        self.assertEqual(candidate.read_text(), "reviewed settings")
+        self.assertEqual(existing.read_text(), "already in Trash")
+
+
 class FixtureTests(IsolatedTests):
     def test_previews_selected_data_despite_an_uncheckable_cache_location(self):
         bundle_id = "org.lfd.preview"
@@ -176,7 +618,7 @@ class FixtureTests(IsolatedTests):
         session.expect("Includes all descendants")
         session.expect("may contain retained user data")
         session.expect(r"\[ Cancel \]")
-        self.assertNotIn("Move to Trash", session.screen.text())
+        self.assertNotIn("[ Move to Trash ]", session.screen.text())
         self.assertEqual(data.read_text(), "retained")
         session.send(b"\r")
         session.expect("Leftover candidates")
@@ -1078,20 +1520,44 @@ class DefaultBuildTests(IsolatedTests):
         ordinary_home = self.root / "ordinary-home"
         cache = ordinary_home / "Library" / "Caches" / bundle_id
         cache.mkdir(parents=True)
+        trash_paths = [home / ".Trash" for home in (self.home, ordinary_home)]
+        for trash in trash_paths:
+            trash.mkdir(mode=0o700)
         session = Session(BINARY, ordinary_home, self.root)
         self.addCleanup(session.close)
         session.search(bundle_id)
         session.expect(re.escape(str(cache)))
         session.expect("Filename match only")
-        session.expect("Selection disabled: required main program checks incomplete")
+        session.expect("View only: outside the cleanup scope")
         self.assertNotIn("Fixture Only.app", session.screen.text())
         session.send(b" \r")
         session.expect("Selected: 0 · Nothing selected for preview")
+        session.send(b"\x1b[C\r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        self.assertNotIn("Move to Trash", session.screen.text())
         session.quit()
         self.assertTrue(cache.is_dir())
+        for trash in trash_paths:
+            self.assertEqual(list(trash.iterdir()), [])
+
+    def test_cannot_authorize_container_cleanup_by_redirecting_home(self):
+        bundle_id = "org.lfd.redirectedhome42A2"
+        container = make_container(self.home, bundle_id)
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(container)))
+        session.expect("View only")
+        session.expect("discovery home differs from the macOS account home")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(list(trash.iterdir()), [])
 
 
 if __name__ == "__main__":
     BINARY = os.path.abspath(sys.argv[1])
-    tests = sys.argv[2:] or ["FixtureTests", "CommandTests"]
+    tests = sys.argv[2:] or ["FixtureTests", "CommandTests", "TrashTests", "ContainerTests"]
     unittest.main(argv=[sys.argv[0], *tests], verbosity=2)

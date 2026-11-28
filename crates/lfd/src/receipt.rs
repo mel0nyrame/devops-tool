@@ -96,6 +96,15 @@ pub struct ReceiptInspection {
     pub application_check: Option<MainProgram>,
 }
 
+impl ReceiptInspection {
+    fn note_application_check(&mut self, check: MainProgram) {
+        self.application_check = Some(
+            self.application_check
+                .map_or(check, |previous| previous.including(check)),
+        );
+    }
+}
+
 impl Receipt {
     pub fn inspect(
         &self,
@@ -138,7 +147,7 @@ impl Receipt {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
                     if is_bundle {
-                        inspection.application_check = Some(MainProgram::Incomplete);
+                        inspection.note_application_check(MainProgram::Incomplete);
                     }
                     issues.push(CheckIssue {
                         source: CheckSource::PackageReceiptPaths,
@@ -158,13 +167,11 @@ impl Receipt {
                 };
                 match verification {
                     Ok(identifier) => {
-                        inspection
-                            .application_check
-                            .get_or_insert(MainProgram::Found);
+                        inspection.note_application_check(MainProgram::Found);
                         Some(identifier)
                     }
                     Err(error) => {
-                        inspection.application_check = Some(MainProgram::Incomplete);
+                        inspection.note_application_check(MainProgram::Incomplete);
                         issues.push(CheckIssue {
                             source: CheckSource::PackageReceiptPaths,
                             path,
@@ -247,15 +254,10 @@ fn scope_paths(
     prefix: Option<&str>,
     bom: &Path,
 ) -> io::Result<Vec<RecordedPath>> {
-    let file = match OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK)
-        .open(bom)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
+        .open(bom)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::other("receipt BOM is not a regular file"));
     }

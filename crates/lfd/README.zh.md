@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-`lfd` 是只读终端工具，用于查看应用的主程序是否仍在，以及检查可能的关联文件。在 macOS 交互式终端中，从工作区根目录运行：
+`lfd` 是用于查看应用主程序是否仍在、检查可能关联文件的终端工具。查找始终只读；明确确认清理后，可以将符合条件的应用容器移到废纸篓。在 macOS 交互式终端中，从工作区根目录运行：
 
 ```sh
 cargo run --locked --offline -p lfd
@@ -14,7 +14,7 @@ cargo run --locked --offline -p lfd
 
 - **关联项**（Related items）：在已检查位置找到匹配的主程序。
 - **残留候选**（Leftover candidates）：在已检查位置未找到匹配的主程序。这不能证明应用已卸载，也不能证明文件可以安全移除。
-- **可能匹配**（Possible matches）：未找到匹配的主程序，但一项必要的主程序检查未完成。仅用户数据位置检查失败或 `.pkg` 收据读取失败，不会改变这个状态。
+- **可能匹配**（Possible matches）：未找到匹配的主程序，但一项必要的主程序检查未完成。与主程序无关的用户数据位置读取失败，不会使主程序检查不完整。
 
 ## 查找范围：主程序与路径名称
 
@@ -23,14 +23,15 @@ cargo run --locked --offline -p lfd
 | `/Applications`、`/Applications/Utilities`、`/System/Applications`、`/System/Applications/Utilities`、`~/Applications` | 直接子项中的 `.app` 目录。匹配去掉 `.app` 的目录名，或读取 `Contents/Info.plist`（最多 4 MiB）中的 `CFBundleDisplayName`、`CFBundleName`、`CFBundleIdentifier`。使用可读字段；缺少元数据时仍可按目录名匹配。不验证或启动应用的可执行文件。 |
 | `PATH` 中的目录 | 检查与查询命令名对应的条目。命令必须是设置了至少一个执行权限位的普通文件；不检查其内容，也不启动它。 |
 | `/opt/homebrew` 和 `/usr/local` 下的 `Cellar/<formula>/<version>` 和 `Caskroom/<cask>` | 精确匹配包名。对 formula，读取 `INSTALL_RECEIPT.json` 并检查各版本 `bin` 和 `sbin` 目录的直接子项。缺少可用记录时，只报告同名可执行文件，名称并非归属证据。对 cask，读取 `.metadata/INSTALL_RECEIPT.json` 并检查应用目录中的 `app` 目标（默认 `/Applications`）；未找到时检查该版本在 Caskroom 的暂存应用包。对 `binary`，仅检查该版本目录内的源文件。每份记录最多读取 4 MiB，不检查其他类型的安装项或范围外路径。 |
-| `~/Library/Application Support`、`~/Library/Containers`、`~/Library/Group Containers`、`~/Library/Caches`、`~/Library/Logs` | 仅匹配直接子项的名称。 |
+| `~/Library/Application Support`、`~/Library/Group Containers`、`~/Library/Caches`、`~/Library/Logs` | 仅匹配直接子项的名称。 |
+| `~/Library/Containers` | 匹配直接子项的名称；对于匹配的应用容器目录，读取[清理范围](#清理范围)所列的 macOS 元数据文件。 |
 | `~/Library/Preferences`、`~/Library/Saved Application State` | 仅匹配直接子项的名称，分别去掉 `.plist` 和 `.savedState` 后匹配。 |
 | `~/.config`、`~/.local/share`、`~/.local/state`、`~/.cache` | 仅匹配直接子项的名称。 |
 | macOS 当前用户的专用临时目录（`getconf DARWIN_USER_TEMP_DIR`） | 仅匹配直接子项的名称。不使用 `$TMPDIR`，也不查找系统共用的临时目录。 |
 
 应用名称匹配不区分大小写；元数据中的 Bundle ID 必须精确匹配，包括大小写。若元数据中有精确匹配的 ID，则优先于名称匹配。文件可按本机元数据中的 Bundle ID 精确匹配，也可按文件名匹配查询。形如 Bundle ID 的点分查询要求精确匹配文件名。仅凭用户输入的标识符不能证明归属。没有匹配元数据的路径名称命中仍只是文件名匹配。
 
-匹配应用元数据中的精确 Bundle ID 时，主程序检查只针对应用目录。若未匹配到精确 Bundle ID 或已登记的 `.pkg` 包标识符，则按名称检查应用目录和 `PATH`，并在标准 Homebrew 位置检查精确匹配的包名。Homebrew 记录可指向待检查的主程序，但记录本身不能证明主程序仍在。记录缺失时继续其他检查。Homebrew 的全局位置只供查看；`lfd` 不调用 Homebrew、不联网、不执行脚本。
+匹配应用元数据中的精确 Bundle ID 时，主程序检查只针对应用目录。若未匹配到精确 Bundle ID 或已登记的 `.pkg` 包标识符，则按名称检查应用目录和 `PATH`，并在标准 Homebrew 位置检查精确匹配的包名。Homebrew 记录可指向待检查的主程序，但记录本身不能证明主程序仍在。记录缺失时继续其他检查。以上是查找规则；清理使用下文列出的组合检查。Homebrew 的全局位置只供查看；`lfd` 不调用 Homebrew、不联网、不执行脚本。
 
 按路径名称查找时，不进入用户数据目录的子目录。不沿符号链接进入目标，包括 `PATH` 上的命令链接。匹配的用户数据链接可能出现在结果中，但不检查链接目标。缺失的查找目录视为没有条目；读取错误和元数据检查失败单独报告。不查找整个主目录、浏览器数据或 Shell 历史。
 
@@ -42,7 +43,7 @@ cargo run --locked --offline -p lfd
 
 ## 查找范围：共享引用内容
 
-除上文列出的应用包元数据、Homebrew 记录和 `.pkg` 收据数据外，`lfd` 仅读取以下来源的文件内容：
+除文档列出的应用包和应用容器元数据、Homebrew 记录及 `.pkg` 收据数据外，`lfd` 只读取以下引用来源的文件内容：
 
 | 来源 | 检查的文件 |
 | --- | --- |
@@ -53,14 +54,16 @@ cargo run --locked --offline -p lfd
 
 `lfd` 不沿引用文件及其父目录中的符号链接进入目标。缺失的来源视为没有匹配；无法读取的文件、超过 1 MiB 的文件和其他检查失败单独报告，不视为检查成功但未找到匹配。
 
-## 清理范围预览
+## 清理范围
 
-普通构建中所有项目仅供查看：仅靠查找无法核实清理所需的全部主程序和归属证据。名称匹配、用户输入的标识符、单独的收据、共享引用或单独的符号链接都不能使项目符合勾选条件。
+普通构建只能移动当前 macOS 账户主目录下的 `~/Library/Containers/<bundle-id>`，即整个应用容器目录。其中的 `.com.apple.containermanagerd.metadata.plist` 必须是可读、可核实的普通文件（最多 4 MiB），且字段 `MCMMetadataIdentifier` 必须与目录的 Bundle ID 精确一致，包括大小写。`lfd` 仅读取这一个元数据文件来核对归属，不读取容器内其他内容。元数据缺失、不可读、是链接、标识符不一致，或路径和对象无法核实时，项目仅供查看。此证据只适用于该容器，不适用于同名缓存、偏好、其他应用数据或 `~/Library/Group Containers` 中的共享容器。共享引用、收据、全局位置及单独的符号链接也只供查看。查询标识符、路径名称或旧收据本身均不授予清理许可。
 
-在隔离预览验证中，只有必要的主程序检查已完成且未发现主程序，并有独立的 Bundle ID 登记证据时，才能勾选以下当前用户的精确路径：
+只有必要的主程序检查均已完成且未发现主程序，才能勾选容器。`lfd` 会组合检查标准应用目录、`PATH` 和 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`、`/usr/local/bin`、`/opt/homebrew/bin` 中同名的独立命令、匹配的 Homebrew 安装，以及已登记 `.pkg` 收据指向标准应用目录内应用包的线索。精确匹配收据或选择身份不会跳过这些检查。遇到匹配的 Homebrew 安装却缺少记录、收据不可读或收据所指的应用包无法核实时，检查可能不完整。发现主程序或必要检查不完整均禁止勾选。
 
-- `~/Library/Application Support/<bundle-id>`（目录）及其直接包含的普通文件和目录。只检查名称和类型，不读取内容，也不跟随符号链接。
-- `~/Library/Preferences/<bundle-id>.plist`（普通文件）。
-- `~/Library/Caches/<bundle-id>`（目录）。
+默认没有勾选项。按 `Space` 勾选或取消勾选合格项，按 `Enter` 核对已选路径。清单列出完整路径，说明目录包含所有子项，并提示保留的用户数据可能一并移动。若同时勾选父目录和其中的子项，清单只列出父目录。路径中的换行显示为 `\n`，字面反斜杠显示为 `\\`。按 `Enter` 确认默认的**取消**，或按 `Esc`，均不会移动任何文件。要移动核对过的路径，按 `→` 选中**移到废纸篓**，再按 `Enter`。结果逐项显示已移动的路径，以及跳过或失败的原因。
 
-默认没有勾选项。按 `Space` 勾选或取消勾选合格项，按 `Enter` 预览已选路径。预览列出完整路径和已知风险（包括保留的数据或设置），说明目录包含其所有子项；如果同时勾选父目录和其中的子项，只在预览中列出父目录。显示路径时，换行显示为 `\n`，字面反斜杠显示为 `\\`。按 `Enter` 确认默认的**取消**，或按 `Esc`，返回结果并保留勾选。此版本不能移动、修改或删除文件。
+移动前，`lfd` 重新检查主程序状态，并复核账户、祖先目录、源对象及其元数据的身份、类型、归属和范围，不跟随符号链接。清理许可和私有废纸篓 `~/.Trash` 以本机实际 macOS 账户为准，不由 `HOME`、`PATH`、`TMPDIR` 或测试环境变量指定。废纸篓必须可访问且与源对象同卷。目标冲突或移动失败时保留原项；不覆盖、不跨卷复制、不提权，也不改用永久删除。复核能降低误处理风险，但路径仍可能在复核后、移动前发生变化。
+
+## 隔离清理验证
+
+`test-fixtures` 构建在隔离主目录及其私有 `.Trash` 中运行相同的容器元数据检查和移动逻辑。先前的预览测试还通过合成登记证据验证父子路径去重和单文件移动，测试路径包括 `~/Library/Application Support/<bundle-id>` 及其直接包含的普通文件和目录、`~/Library/Preferences/<bundle-id>.plist` 和 `~/Library/Caches/<bundle-id>`。这些仅供测试的路径和合成记录不能在普通构建中授予清理许可。清理冒烟测试不会移动已有应用或用户数据。

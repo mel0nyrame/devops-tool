@@ -2,7 +2,7 @@
 
 [简体中文](README.zh.md) · [Screenshots](#screenshots) · [Install](#install) · [Platform status](#platform-status)
 
-Two published Rust command-line tools for your local machine. Use [`fsz`](#fsz) to see how large files and folders are. Use [`rmem`](#rmem) to see which processes are using memory. The source-only [`lfd`](crates/lfd/README.md) inspects potential app uninstall leftovers on macOS.
+Two published Rust command-line tools for your local machine. Use [`fsz`](#fsz) to see how large files and folders are. Use [`rmem`](#rmem) to see which processes are using memory. The source-only [`lfd`](crates/lfd/README.md) inspects potential app uninstall leftovers on macOS and can move verified app containers to Trash.
 
 <p align="center">
   <a href="#fsz"><img src="docs/assets/readme/fsz-overview.webp" width="48%" alt="File tree and size bars. Jump to the fsz screenshot."></a>
@@ -82,6 +82,6 @@ The [native CI workflow](.github/workflows/ci.yml) builds and tests `fsz` and `r
 
 The `fsz` check expects **8 B** when the scan skips a nested directory symlink and **13 B** when the symlink is the input. The `rmem` check covers PID search, matching process details, `Esc` to return to the list, and `q` to return to a working shell.
 
-The read-only `lfd` inspection was built and smoke-tested natively on macOS arm64 (26.7.3), including the cleanup preview with isolated fixtures. `lfd` does not support Windows or Linux.
+`lfd` was built and smoke-tested natively on macOS arm64 (26.7.3). Cleanup preview, confirmation, and Trash moves were tested with isolated fixtures. `lfd` does not support Windows or Linux.
 
 [Glossary](GLOSSARY.md) · [Design decisions](docs/adr/)

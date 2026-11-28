@@ -74,6 +74,7 @@ pub struct HomebrewMatches {
 pub fn find_packages(
     locations: &Locations,
     query: &str,
+    require_records: bool,
     issues: &mut Vec<CheckIssue>,
 ) -> HomebrewMatches {
     let mut matches = HomebrewMatches::default();
@@ -91,8 +92,8 @@ pub fn find_packages(
                     continue;
                 };
                 let mut scan = match kind {
-                    HomebrewKind::Formula => find_formula(&path, query, issues),
-                    HomebrewKind::Cask => find_cask(locations, &path, issues),
+                    HomebrewKind::Formula => find_formula(&path, query, require_records, issues),
+                    HomebrewKind::Cask => find_cask(locations, &path, require_records, issues),
                 };
                 matches
                     .unrecorded_commands
@@ -115,7 +116,12 @@ pub fn find_packages(
     matches
 }
 
-fn find_formula(path: &Path, query: &str, issues: &mut Vec<CheckIssue>) -> PackageScan {
+fn find_formula(
+    path: &Path,
+    query: &str,
+    require_records: bool,
+    issues: &mut Vec<CheckIssue>,
+) -> PackageScan {
     let mut scan = PackageScan {
         checks_path: true,
         ..Default::default()
@@ -125,7 +131,8 @@ fn find_formula(path: &Path, query: &str, issues: &mut Vec<CheckIssue>) -> Packa
             continue;
         };
         let receipt = version.join(INSTALL_RECEIPT);
-        let record_type = installation_record(&receipt, issues).map(|(_, _, file_type)| file_type);
+        let record_type = installation_record(&receipt, require_records, issues)
+            .map(|(_, _, file_type)| file_type);
         for subdirectory in ["bin", "sbin"] {
             for entry in entries(&version.join(subdirectory), SOURCE, issues) {
                 if record_type.is_some() {
@@ -147,10 +154,16 @@ fn find_formula(path: &Path, query: &str, issues: &mut Vec<CheckIssue>) -> Packa
     scan
 }
 
-fn find_cask(locations: &Locations, cask: &Path, issues: &mut Vec<CheckIssue>) -> PackageScan {
+fn find_cask(
+    locations: &Locations,
+    cask: &Path,
+    require_records: bool,
+    issues: &mut Vec<CheckIssue>,
+) -> PackageScan {
     let mut scan = PackageScan::default();
     let receipt = cask.join(".metadata").join(INSTALL_RECEIPT);
-    let Some((record, source, file_type)) = installation_record(&receipt, issues) else {
+    let Some((record, source, file_type)) = installation_record(&receipt, require_records, issues)
+    else {
         return scan;
     };
     let directories = locations.application_dirs();
@@ -362,11 +375,12 @@ fn directory(entry: fs::DirEntry, issues: &mut Vec<CheckIssue>) -> Option<PathBu
 
 fn installation_record(
     path: &Path,
+    required: bool,
     issues: &mut Vec<CheckIssue>,
 ) -> Option<(Retained<NSDictionary>, Retained<NSDictionary>, fs::FileType)> {
     match read_installation_record(path) {
         Ok(record) => Some(record),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !required => None,
         Err(error) => {
             issues.push(CheckIssue {
                 source: SOURCE,

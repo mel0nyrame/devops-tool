@@ -7,9 +7,12 @@ use ratatui::{
     widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::discovery::{
-    ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Identity, Item, MainProgram,
-    Report,
+use crate::{
+    cleanup::{CONTAINER_METADATA, MoveResult, Outcome},
+    discovery::{
+        ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Identity, Item, MainProgram,
+        Report,
+    },
 };
 
 pub fn draw_search(frame: &mut Frame, input: &str, error: &str) {
@@ -94,8 +97,13 @@ pub fn draw_report(
     empty_preview: bool,
     scroll: u16,
 ) {
-    let selection_status = match report.selection_program {
-        MainProgram::Incomplete => "Selection disabled: required main program checks incomplete.\n",
+    let selection_status = match report
+        .container_program
+        .or_else(|| cfg!(feature = "test-fixtures").then_some(report.selection_program))
+    {
+        Some(MainProgram::Incomplete) => {
+            "Selection disabled: required main program checks incomplete.\n"
+        }
         _ => "",
     };
     let selection_line = if empty_preview {
@@ -131,7 +139,7 @@ pub fn draw_report(
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), header);
     let rows = report.items.iter().enumerate().map(|(index, item)| {
         let name = visible(&item.path.file_name().unwrap_or_default().to_string_lossy());
-        if item.selection_blocker(&report.selection_program).is_some() {
+        if item.selection_blocker(report).is_some() {
             name
         } else if marked.contains(&index) {
             format!("[x] {name}")
@@ -145,22 +153,22 @@ pub fn draw_report(
         .and_then(|index| report.items.get(index))
         .map_or_else(
             || "No matching items.".into(),
-            |item| evidence(item, &report.selection_program),
+            |item| evidence(item, report),
         );
     frame.render_widget(panel(text, " Evidence ", scroll), right);
     frame.render_widget(
         Paragraph::new(format!(
-            "{selection_status}Selected: {} · {selection_line} · Read-only\n↑/↓ browse · PgUp/PgDn evidence · q / Esc quit",
+            "{selection_status}Selected: {} · {selection_line}\n↑/↓ browse · PgUp/PgDn evidence · q / Esc quit",
             marked.len()
         )),
         footer,
     );
 }
 
-pub fn draw_preview(frame: &mut Frame, items: &[&Item], scroll: u16) {
+pub fn draw_preview(frame: &mut Frame, items: &[&Item], move_to_trash: bool, scroll: u16) {
     let [body, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(frame.area());
-    let mut text = String::from("Preview only: no files will be moved or deleted.\n\n");
+    let mut text = String::from("Only these paths will be moved if you confirm Move to Trash.\n\n");
     for item in items {
         text.push_str(&display_path(&item.path));
         text.push('\n');
@@ -170,10 +178,33 @@ pub fn draw_preview(frame: &mut Frame, items: &[&Item], scroll: u16) {
         text.push_str(&format!("Risk: {}.\n\n", item.kind.risk()));
     }
     frame.render_widget(panel(text, " Cleanup preview ", scroll), body);
+    let choices = if move_to_trash {
+        "Cancel     [ Move to Trash ]"
+    } else {
+        "[ Cancel ]     Move to Trash"
+    };
     frame.render_widget(
-        Paragraph::new("[ Cancel ] · Enter / Esc return · PgUp/PgDn scroll · q quit"),
+        Paragraph::new(format!(
+            "{choices}\n←/→ choose · Enter confirm · Esc return · PgUp/PgDn scroll"
+        )),
         footer,
     );
+}
+
+pub fn draw_outcomes(frame: &mut Frame, outcomes: &[Outcome], scroll: u16) {
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    let mut text = String::new();
+    for outcome in outcomes {
+        let status = match &outcome.result {
+            MoveResult::Moved => "Moved to Trash".into(),
+            MoveResult::Skipped(reason) => format!("Skipped: {}", visible(reason)),
+            MoveResult::Failed(reason) => format!("Failed: {}", visible(reason)),
+        };
+        text.push_str(&format!("{status}\n{}\n\n", display_path(&outcome.path)));
+    }
+    frame.render_widget(panel(text, " Cleanup results ", scroll), body);
+    frame.render_widget(Paragraph::new("PgUp/PgDn scroll · q / Esc quit"), footer);
 }
 
 pub fn draw_issues(
@@ -240,7 +271,7 @@ fn panel(text: String, title: &str, scroll: u16) -> Paragraph<'_> {
         .scroll((scroll, 0))
 }
 
-fn evidence(item: &Item, program: &MainProgram) -> String {
+fn evidence(item: &Item, report: &Report) -> String {
     let kind = match item.kind {
         ArtifactKind::ApplicationBundle => "Application bundle",
         ArtifactKind::StandaloneCommand => "Executable command",
@@ -261,7 +292,7 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
         "{}\n\nType: {kind}\nRisk: {risk}\n\n",
         display_path(&item.path)
     );
-    if let Some(reason) = item.selection_blocker(program) {
+    if let Some(reason) = item.selection_blocker(report) {
         text.push_str(&format!("View only: {reason}.\n\n"));
     } else {
         text.push_str("Eligible for preview (Space to select or deselect).\n\n");
@@ -351,6 +382,7 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
             identifier,
             source,
             app_data_root,
+            ..
         } => {
             text.push_str(&format!(
                 "Standard app-specific data path matches the registered Bundle ID: {}\nRegistration: {}",
@@ -363,6 +395,17 @@ fn evidence(item: &Item, program: &MainProgram) -> String {
                     display_path(app_data_root)
                 ));
             }
+        }
+        Evidence::AppContainer { snapshot } => {
+            match snapshot {
+                Ok(_) => text.push_str("Container metadata matches the directory Bundle ID."),
+                Err(error) => text.push_str(&format!(
+                    "Container ownership could not be verified: {}",
+                    visible(&error.to_string()),
+                )),
+            }
+            let metadata_path = item.path.join(CONTAINER_METADATA);
+            text.push_str(&format!("\nMetadata: {}", display_path(&metadata_path)));
         }
         Evidence::SharedReference { matched_term } => text.push_str(&format!(
             "Shared reference: matched {} in file contents.",

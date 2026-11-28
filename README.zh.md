@@ -2,7 +2,7 @@
 
 [English](README.md) · [运行截图](#运行截图) · [安装](#安装) · [平台状态](#平台状态)
 
-两个已发布的 Rust 命令行工具，用于查看本机状态。用 [`fsz`](#fsz) 查看文件和目录的大小。用 [`rmem`](#rmem) 查看哪些进程占用内存。仅从源码运行的 [`lfd`](crates/lfd/README.zh.md) 可在 macOS 上检查可能的应用卸载残留。
+两个已发布的 Rust 命令行工具，用于查看本机状态。用 [`fsz`](#fsz) 查看文件和目录的大小。用 [`rmem`](#rmem) 查看哪些进程占用内存。仅从源码运行的 [`lfd`](crates/lfd/README.zh.md) 可在 macOS 上检查可能的应用卸载残留，并将核实归属的应用容器移到废纸篓。
 
 <p align="center">
   <a href="#fsz"><img src="docs/assets/readme/fsz-overview.webp" width="48%" alt="文件树和大小条形图。跳到 fsz 运行截图。"></a>
@@ -82,6 +82,6 @@ cargo install --locked --path crates/rmem
 
 `fsz` 跳过嵌套目录符号链接时应显示 **8 B**。将该链接直接作为输入时应显示 **13 B**。`rmem` 检查覆盖按 PID 搜索、打开匹配进程的详情、按 `Esc` 返回列表，以及按 `q` 退出后继续使用 shell。
 
-`lfd` 的只读检查已在 macOS arm64（26.7.3）通过原生构建和冒烟检查，其中清理预览使用隔离测试数据验证。`lfd` 不支持 Windows 或 Linux。
+`lfd` 已在 macOS arm64（26.7.3）通过原生构建和冒烟检查；清理预览、确认和废纸篓移动使用隔离测试数据验证。`lfd` 不支持 Windows 或 Linux。
 
 [术语表](GLOSSARY.md) · [设计决策](docs/adr/)

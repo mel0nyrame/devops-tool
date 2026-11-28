@@ -3,6 +3,8 @@ mod app;
 #[cfg(target_os = "macos")]
 mod bundle;
 #[cfg(target_os = "macos")]
+mod cleanup;
+#[cfg(target_os = "macos")]
 mod discovery;
 #[cfg(target_os = "macos")]
 mod homebrew;
