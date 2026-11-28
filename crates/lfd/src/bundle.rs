@@ -1,15 +1,11 @@
-use std::{
-    fs::OpenOptions,
-    io::{self, Read},
-    os::unix::fs::OpenOptionsExt,
-    path::Path,
-    ptr,
-};
+use std::{io, path::Path, ptr};
 
 use objc2::rc::autoreleasepool;
 use objc2_foundation::{
     NSData, NSDictionary, NSPropertyListMutabilityOptions, NSPropertyListSerialization, NSString,
 };
+
+use crate::locations::read_metadata_file;
 
 pub struct BundleMetadata {
     pub display_name: Option<String>,
@@ -23,19 +19,7 @@ pub struct ParsedBundle {
 }
 
 pub fn read_metadata(path: &Path) -> io::Result<ParsedBundle> {
-    const MAX_METADATA_SIZE: u64 = 4 * 1024 * 1024;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::other("Info.plist is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_METADATA_SIZE + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_METADATA_SIZE {
-        return Err(io::Error::other("Info.plist exceeds 4 MiB"));
-    }
+    let bytes = read_metadata_file(path, "Info.plist")?;
 
     autoreleasepool(|_| {
         let data = NSData::with_bytes(&bytes);

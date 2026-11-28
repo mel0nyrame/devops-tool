@@ -1,5 +1,7 @@
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Read},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -17,6 +19,28 @@ impl Locations {
             self.system_root.join("System/Applications/Utilities"),
             self.home.join("Applications"),
         ]
+    }
+
+    pub fn homebrew_prefixes(&self) -> [PathBuf; 2] {
+        [
+            self.system_root.join("opt/homebrew"),
+            self.system_root.join("usr/local"),
+        ]
+    }
+
+    pub fn path_dirs(&self) -> Vec<PathBuf> {
+        let Some(path) = std::env::var_os("PATH") else {
+            return Vec::new();
+        };
+        let directories = std::env::split_paths(&path);
+        #[cfg(feature = "test-fixtures")]
+        let directories = directories.filter(|path| {
+            path.starts_with(&self.system_root)
+                && !path
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+        });
+        directories.collect()
     }
 
     pub fn current() -> io::Result<Self> {
@@ -71,6 +95,23 @@ impl Locations {
             })
         }
     }
+}
+
+pub fn read_metadata_file(path: &Path, label: &str) -> io::Result<Vec<u8>> {
+    const MAX_METADATA_SIZE: u64 = 4 * 1024 * 1024;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other(format!("{label} is not a regular file")));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_METADATA_SIZE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_METADATA_SIZE {
+        return Err(io::Error::other(format!("{label} exceeds 4 MiB")));
+    }
+    Ok(bytes)
 }
 
 pub fn check_path(path: &Path) -> io::Result<fs::Metadata> {

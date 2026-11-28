@@ -2,6 +2,7 @@
 
 import errno
 import fcntl
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -27,7 +28,7 @@ ROWS, COLS = RATATUI_PTY["ROWS"], RATATUI_PTY["COLS"]
 
 
 class Session:
-    def __init__(self, binary, home, fixture_root):
+    def __init__(self, binary, home, fixture_root, path_dirs=()):
         self.screen = Screen()
         self.transcript = bytearray()
         self.shell, self.fd = pty.fork()
@@ -35,6 +36,7 @@ class Session:
             os.environ.update(
                 TERM="xterm-256color", PS1="lfd-smoke> ", ENV="",
                 HOME=str(home), LFD_TEST_ROOT=str(fixture_root),
+                PATH=os.pathsep.join(map(str, path_dirs)),
             )
             os.execl("/bin/sh", "sh", "-i")
         try:
@@ -111,8 +113,8 @@ class IsolatedTests(unittest.TestCase):
         self.home = self.root / "home"
         self.home.mkdir()
 
-    def start(self):
-        session = Session(BINARY, self.home, self.root)
+    def start(self, *path_dirs):
+        session = Session(BINARY, self.home, self.root, path_dirs)
         self.addCleanup(session.close)
         return session
 
@@ -294,6 +296,216 @@ class FixtureTests(IsolatedTests):
                 self.assertNotIn("Application name or Bundle ID", result.stdout)
 
 
+class CommandTests(IsolatedTests):
+    def test_finds_exact_executable_on_path_without_launching_it(self):
+        marker = self.root / "unexpected-launch"
+        bins = self.home / "bin"
+        bins.mkdir()
+        command = bins / "downloaded-tool"
+        script = f"#!/bin/sh\n: > {shlex.quote(str(marker))}\n"
+        command.write_text(script)
+        command.chmod(0o755)
+        decoys = self.home / "non-executable"
+        decoys.mkdir()
+        (decoys / command.name).write_text("not executable")
+        session = self.start(decoys, bins)
+        session.search(command.name)
+        session.expect("Related items")
+        session.expect(re.escape(str(command)))
+        session.expect("Executable name matches the query in PATH")
+        session.quit()
+        self.assertEqual(command.read_text(), script)
+        self.assertFalse(marker.exists())
+
+    def test_checks_formula_cellar_using_a_local_installation_record(self):
+        keg = self.root / "opt/homebrew/Cellar/formula-tool@2/2.0"
+        binary = keg / "bin/different-command"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("synthetic executable")
+        binary.chmod(0o755)
+        receipt = keg / "INSTALL_RECEIPT.json"
+        receipt.write_text('{"homebrew_version":"6.0.0","source":{"tap":"homebrew/core"}}')
+        session = self.start()
+        session.search("formula-tool@2")
+        session.expect("Related items")
+        session.expect(re.escape(str(binary)))
+        session.expect("Local Homebrew installation record")
+        session.expect("Homebrew global location: view-only")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(receipt)))
+        session.expect("Homebrew formula installation record")
+        session.quit()
+        self.assertEqual(binary.read_text(), "synthetic executable")
+        self.assertTrue(receipt.is_file())
+
+    def test_checks_cask_app_using_local_record_without_following_staged_link(self):
+        cask = self.root / "usr/local/Caskroom/cask-new-name"
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({"source": {"version": "2.0"}, "uninstall_artifacts": [
+            {"app": ["Original.app", {"target": "Graphical Choice.app"}]},
+            {"zap": [{"trash": ["~/donotread"]}]},
+        ]}))
+        bundle = make_app(self.root / "Applications", "Graphical Choice.app", "Graphical Choice", "org.lfd.cask")
+        external = make_app(self.root / "outside", "Unrelated.app", "Unrelated", "org.lfd.unrelated")
+        staged = cask / "2.0/Original.app"
+        staged.parent.mkdir()
+        staged.symlink_to(external, target_is_directory=True)
+        session = self.start()
+        session.search(cask.name)
+        session.expect("Related items")
+        session.expect(re.escape(str(bundle)))
+        session.expect("CFBundleIdentifier: org.lfd.cask")
+        session.expect("Local Homebrew installation record")
+        self.assertNotIn("org.lfd.unrelated", session.screen.text())
+        self.assertNotIn("Uncheckable locations", session.screen.text())
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(receipt)))
+        session.expect("Homebrew cask installation record")
+        session.quit()
+        self.assertTrue(staged.is_symlink())
+        self.assertTrue(bundle.is_dir())
+
+    def test_checks_cask_binary_payload_and_ignores_paths_outside_the_package(self):
+        cask = self.root / "opt/homebrew/Caskroom/command-cask"
+        binary = cask / "2.0/toolkit/cask-command"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("cask executable")
+        binary.chmod(0o755)
+        outside = self.root / "outside-executable"
+        outside.write_text("not installed by the cask")
+        outside.chmod(0o755)
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir()
+        receipt.write_text(json.dumps({"source": {"version": "2.0"}, "uninstall_artifacts": [
+            {"binary": [str(binary)]}, {"binary": [str(outside)]},
+        ]}))
+        session = self.start()
+        session.search(cask.name)
+        session.expect("Main program found")
+        session.expect(re.escape(str(binary)))
+        session.expect("Local Homebrew installation record")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(receipt)))
+        self.assertNotIn(outside.name, session.screen.text())
+        session.quit()
+        self.assertEqual(outside.read_text(), "not installed by the cask")
+
+    def test_keeps_name_evidence_when_formula_installation_record_is_missing(self):
+        keg = self.root / "usr/local/Cellar/unrecorded-tool/2.0"
+        command = keg / "bin/unrecorded-tool"
+        command.parent.mkdir(parents=True)
+        command.write_text("unrecorded executable")
+        command.chmod(0o755)
+        other = command.with_name("unrelated-command")
+        other.write_text("no exact name match")
+        other.chmod(0o755)
+        cache = self.home / "Library/Caches/unrecorded-tool"
+        cache.mkdir(parents=True)
+        session = self.start()
+        session.search(command.name)
+        session.expect("Related items")
+        session.expect(re.escape(str(command)))
+        session.expect("No local Homebrew installation record")
+        session.expect("application ownership not established")
+        self.assertNotIn(other.name, session.screen.text())
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(cache)))
+        session.expect("Filename match only; application ownership not established")
+        session.quit()
+        self.assertFalse((keg / "INSTALL_RECEIPT.json").exists())
+        self.assertTrue(cache.is_dir())
+
+    def test_record_without_a_program_is_a_leftover_candidate(self):
+        cask = self.root / "opt/homebrew/Caskroom/former-app"
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({"source": {"version": "1.0"}, "uninstall_artifacts": [
+            {"app": ["Former App.app"]},
+        ]}))
+        session = self.start()
+        session.search(cask.name)
+        session.expect("Main program not found in the checked locations")
+        session.expect("Leftover candidates")
+        session.expect(re.escape(str(receipt)))
+        session.expect("not proof of a current main program")
+        session.quit()
+        self.assertTrue(receipt.is_file())
+
+    def test_unknown_program_reports_a_blocked_path_check_without_following_it(self):
+        target = self.root / "not-on-path"
+        target.mkdir()
+        binary = target / "unknown-tool"
+        binary.write_text("not reached through PATH links")
+        binary.chmod(0o755)
+        linked = self.home / "linked-bin"
+        linked.symlink_to(target, target_is_directory=True)
+        session = self.start(linked)
+        session.search(binary.name)
+        session.expect("Main program check incomplete")
+        session.expect("No matching items")
+        session.send(b"i")
+        session.expect("PATH command check")
+        session.expect("symbolic link not followed")
+        session.quit()
+        self.assertTrue(linked.is_symlink())
+        self.assertEqual(binary.read_text(), "not reached through PATH links")
+
+    def test_invalid_formula_record_is_reported_without_claiming_the_keg_binary(self):
+        package = self.root / "opt/homebrew/Cellar/unverified-formula"
+        unrelated = package / "1.0/bin/unrelated-tool"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("no evidence connecting this executable")
+        unrelated.chmod(0o755)
+        receipt = package / "1.0/INSTALL_RECEIPT.json"
+        receipt.write_text("not a valid Homebrew record")
+        cache = self.home / "Library/Caches" / package.name
+        cache.mkdir(parents=True)
+        session = self.start()
+        session.search(package.name)
+        session.expect("Main program check incomplete")
+        session.expect(re.escape(str(cache)))
+        session.expect("application ownership not established")
+        self.assertNotIn(unrelated.name, session.screen.text())
+        session.send(b"i")
+        session.expect(re.escape(str(receipt)))
+        session.expect("Homebrew location or record")
+        session.quit()
+        self.assertEqual(receipt.read_text(), "not a valid Homebrew record")
+
+    def test_chooses_one_identity_across_same_named_app_command_and_cask(self):
+        name = "shared-tool"
+        existing = make_app(self.root / "Applications", "Unrelated.app", name, "org.lfd.separate")
+        command = self.home / "bin" / name
+        command.parent.mkdir()
+        command.write_text("standalone command")
+        command.chmod(0o755)
+        cask = self.root / "opt/homebrew/Caskroom" / name
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir(parents=True)
+        bundled = make_app(self.root / "Applications", "Cask Bundle.app", "Cask Bundle", "org.lfd.caskbundle")
+        receipt.write_text(json.dumps({"source": {"version": "1.0"}, "uninstall_artifacts": [
+            {"app": [bundled.name]},
+        ]}))
+        for cache in (name, "org.lfd.separate", "org.lfd.caskbundle"):
+            (self.home / "Library/Caches" / cache).mkdir(parents=True)
+        session = self.start(command.parent)
+        session.search(name)
+        session.expect("Choose one application")
+        for detail in (str(existing), str(command), "Homebrew cask: shared-tool"):
+            session.expect(re.escape(detail))
+        session.send(b"\x1b[B\x1b[B")
+        session.expect("Bundle ID: org.lfd.caskbundle")
+        session.expect(re.escape(str(bundled)))
+        session.send(b"\r")
+        session.expect("Related items")
+        session.expect(re.escape(str(bundled)))
+        self.assertNotIn(existing.name, session.screen.text())
+        self.assertNotIn("org.lfd.separate", session.screen.text())
+        self.assertNotRegex(session.screen.text(), r"│ {1,3}shared-tool +│")
+        session.quit()
+
+
 class DefaultBuildTests(IsolatedTests):
     def test_rejects_arguments_instead_of_searching_an_arbitrary_path(self):
         result = subprocess.run(
@@ -319,5 +531,5 @@ class DefaultBuildTests(IsolatedTests):
 
 if __name__ == "__main__":
     BINARY = os.path.abspath(sys.argv[1])
-    tests = sys.argv[2:] or ["FixtureTests"]
+    tests = sys.argv[2:] or ["FixtureTests", "CommandTests"]
     unittest.main(argv=[sys.argv[0], *tests], verbosity=2)

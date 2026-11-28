@@ -5,6 +5,8 @@ mod bundle;
 #[cfg(target_os = "macos")]
 mod discovery;
 #[cfg(target_os = "macos")]
+mod homebrew;
+#[cfg(target_os = "macos")]
 mod locations;
 #[cfg(target_os = "macos")]
 mod ui;
@@ -15,7 +17,7 @@ fn main() -> std::io::Result<()> {
 
     if std::env::args_os().len() != 1 {
         return Err(io::Error::other(
-            "lfd does not take arguments; enter an application name or Bundle ID interactively",
+            "lfd does not take arguments; enter an application name or identifier interactively",
         ));
     }
     let locations = locations::Locations::current()?;
