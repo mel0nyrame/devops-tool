@@ -44,6 +44,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./.github/scripts/fsz-windows-symlink-smoke.ps1
+      - name: lfd default build smoke check
+        if: runner.os == 'macOS'
+        run: python3 .github/scripts/lfd-smoke.py target/debug/lfd DefaultBuildTests
+      - name: lfd isolated cleanup smoke check
+        if: runner.os == 'macOS'
+        run: |
+          cargo +stable build --locked -p lfd --features test-fixtures
+          python3 .github/scripts/lfd-smoke.py target/debug/lfd
   packaging:
     runs-on: ubuntu-latest
     steps:

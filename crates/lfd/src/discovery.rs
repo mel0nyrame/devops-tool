@@ -1,0 +1,957 @@
+mod references;
+
+use std::{
+    collections::HashSet,
+    fs, io,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
+
+use crate::{
+    bundle::{BundleMetadata, has_app_extension, read_metadata},
+    cleanup::{CONTAINERS, Snapshot},
+    homebrew::{self, HomebrewKind, HomebrewPackage},
+    locations::{Locations, check_path},
+    receipt::{self, Receipt, ReceiptInspection},
+};
+
+#[derive(Clone, Copy)]
+pub enum ArtifactKind {
+    ApplicationBundle,
+    StandaloneCommand,
+    HomebrewRecord,
+    ApplicationData,
+    Preferences,
+    Cache,
+    PackageReceipt,
+    Configuration,
+    State,
+    Logs,
+    TemporaryData,
+    SharedConfiguration,
+    ExtensionSource,
+}
+
+pub enum BundleMatch {
+    DirectoryName,
+    DisplayName,
+    Name,
+    Identifier,
+    HomebrewCask(PathBuf),
+}
+
+pub enum Evidence {
+    ApplicationBundle(Application),
+    PathCommand,
+    HomebrewRecord(HomebrewKind),
+    HomebrewProgram(PathBuf),
+    UnrecordedHomebrewCommand,
+    PackageReceipt {
+        identifier: String,
+        matched_package_filename: Option<String>,
+    },
+    PackageReceiptPath {
+        identifier: String,
+        receipt: PathBuf,
+        verified_bundle_id: Option<String>,
+    },
+    FilenameMatch,
+    BundleIdentifierFilename {
+        identifier: String,
+        source: PathBuf,
+    },
+    RegisteredBundleData {
+        identifier: String,
+        source: PathBuf,
+        app_data_root: PathBuf,
+        snapshot: io::Result<Snapshot>,
+    },
+    AppContainer {
+        snapshot: io::Result<Snapshot>,
+    },
+    UnassignedContainer,
+    SharedReference {
+        matched_term: String,
+    },
+}
+
+pub struct Item {
+    pub path: PathBuf,
+    pub kind: ArtifactKind,
+    pub evidence: Evidence,
+    pub file_type: fs::FileType,
+    pub(crate) in_cleanup_scope: bool,
+}
+
+impl Item {
+    pub fn selection_blocker(&self, report: &Report) -> Option<&'static str> {
+        if self.file_type.is_symlink() {
+            return Some("symbolic links cannot be selected");
+        }
+        match self.evidence {
+            Evidence::SharedReference { .. } => {
+                return Some("a reference does not establish ownership of this file");
+            }
+            Evidence::PackageReceipt { .. } | Evidence::PackageReceiptPath { .. } => {
+                return Some("a receipt does not establish current ownership or installation");
+            }
+            Evidence::UnassignedContainer => {
+                return Some("the query matched multiple identities");
+            }
+            _ => {}
+        }
+        if !self.in_cleanup_scope {
+            return Some("outside the cleanup scope");
+        }
+        if let Evidence::AppContainer { snapshot } = &self.evidence {
+            return match (&report.container_program, snapshot) {
+                (Some(MainProgram::Found), _) => Some("main program found"),
+                (Some(MainProgram::NotFound), Ok(_)) => None,
+                (Some(MainProgram::NotFound), Err(_)) => {
+                    Some("container ownership could not be verified")
+                }
+                _ => Some("required main program checks incomplete"),
+            };
+        }
+        let program = &report.selection_program;
+        match (&self.evidence, program) {
+            (
+                Evidence::RegisteredBundleData {
+                    snapshot: Ok(_), ..
+                },
+                MainProgram::NotFound,
+            ) => None,
+            (
+                Evidence::RegisteredBundleData {
+                    snapshot: Err(_), ..
+                },
+                MainProgram::NotFound,
+            ) => Some("cleanup path could not be verified"),
+            (
+                Evidence::RegisteredBundleData { .. } | Evidence::BundleIdentifierFilename { .. },
+                MainProgram::Found,
+            ) => Some("main program found"),
+            (Evidence::RegisteredBundleData { .. }, MainProgram::Incomplete) => {
+                Some("required main program checks incomplete")
+            }
+            _ => Some("application ownership not established"),
+        }
+    }
+}
+
+impl ArtifactKind {
+    pub fn risk(self) -> &'static str {
+        match self {
+            Self::ApplicationBundle => "may contain an installed application",
+            Self::StandaloneCommand => "not launched or inspected",
+            Self::HomebrewRecord => "installation evidence, not proof of a current main program",
+            Self::ApplicationData => "may contain retained user data",
+            Self::Preferences => "may contain retained settings",
+            Self::Cache => "may contain cached data the application would need to recreate",
+            Self::PackageReceipt => "historical evidence only",
+            Self::Configuration => "may contain retained settings",
+            Self::State => "may contain retained sessions or user data",
+            Self::Logs => "may contain retained activity records",
+            Self::TemporaryData => "contents and ownership have not been verified",
+            Self::SharedConfiguration => "may contain settings for another tool",
+            Self::ExtensionSource => "may contain code for another tool",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CheckSource {
+    Applications,
+    BundleMetadata,
+    PathCommand,
+    Homebrew,
+    UserData,
+    PackageReceipts,
+    PackageReceiptPaths,
+    ReferenceContent,
+}
+
+pub struct CheckIssue {
+    pub source: CheckSource,
+    pub path: PathBuf,
+    pub error: io::Error,
+}
+
+#[derive(Clone, Copy)]
+pub enum MainProgram {
+    Found,
+    NotFound,
+    Incomplete,
+}
+
+impl MainProgram {
+    pub fn including(self, other: Self) -> Self {
+        Self::from_check(
+            matches!(self, Self::Found) || matches!(other, Self::Found),
+            matches!(self, Self::Incomplete) || matches!(other, Self::Incomplete),
+        )
+    }
+
+    pub fn from_check(found: bool, incomplete: bool) -> Self {
+        if found {
+            Self::Found
+        } else if incomplete {
+            Self::Incomplete
+        } else {
+            Self::NotFound
+        }
+    }
+}
+
+pub struct Report {
+    pub main_program: MainProgram,
+    pub selection_program: MainProgram,
+    pub container_program: Option<MainProgram>,
+    pub items: Vec<Item>,
+    pub issues: Vec<CheckIssue>,
+}
+
+pub struct Application {
+    pub path: PathBuf,
+    pub metadata: Option<BundleMetadata>,
+    pub matched_by: BundleMatch,
+    pub(crate) file_type: fs::FileType,
+}
+
+impl Application {
+    pub fn metadata_path(&self) -> PathBuf {
+        self.path.join("Contents/Info.plist")
+    }
+
+    pub fn identifier(&self) -> Option<&str> {
+        self.metadata.as_ref()?.identifier.as_deref()
+    }
+
+    pub fn into_item(self) -> Item {
+        Item {
+            path: self.path.clone(),
+            kind: ArtifactKind::ApplicationBundle,
+            file_type: self.file_type,
+            in_cleanup_scope: false,
+            evidence: Evidence::ApplicationBundle(self),
+        }
+    }
+}
+
+pub enum Identity {
+    Application(Application),
+    Command(Item),
+    Homebrew(HomebrewPackage),
+    PackageReceipt(Receipt),
+}
+
+impl Identity {
+    fn matches_exact_identifier(&self) -> bool {
+        match self {
+            Self::Application(app) => matches!(app.matched_by, BundleMatch::Identifier),
+            Self::PackageReceipt(receipt) => receipt.exact,
+            _ => false,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Application(app) => &app.path,
+            Self::Command(item) => &item.path,
+            Self::Homebrew(package) => &package.path,
+            Self::PackageReceipt(receipt) => &receipt.path,
+        }
+    }
+}
+
+pub struct Search {
+    pub matches: Vec<Identity>,
+    program_issues: Vec<CheckIssue>,
+    receipt_issues: Vec<CheckIssue>,
+}
+
+impl Search {
+    pub fn run(locations: &Locations, query: &str) -> Self {
+        let mut program_issues = Vec::new();
+        let mut receipt_issues = Vec::new();
+        let mut matches: Vec<_> = find_applications(locations, query, false, &mut program_issues)
+            .into_iter()
+            .map(Identity::Application)
+            .chain(
+                receipt::find(locations, query, &mut receipt_issues)
+                    .into_iter()
+                    .map(Identity::PackageReceipt),
+            )
+            .collect();
+        if matches.iter().any(Identity::matches_exact_identifier) {
+            matches.retain(Identity::matches_exact_identifier);
+        } else {
+            let brew = homebrew::find_packages(locations, query, false, &mut program_issues);
+            let commands = find_path_commands(locations, query, &mut program_issues);
+            let belongs_to_package = |path: &Path| {
+                brew.packages
+                    .iter()
+                    .any(|package| package.items.iter().any(|item| item.path == path))
+            };
+            matches.retain(|identity| !belongs_to_package(identity.path()));
+            matches.extend(
+                commands
+                    .into_iter()
+                    .filter(|command| {
+                        !belongs_to_package(&command.path)
+                            && !brew
+                                .unrecorded_commands
+                                .iter()
+                                .any(|other| command.path == other.path)
+                    })
+                    .map(Identity::Command),
+            );
+            matches.extend(brew.unrecorded_commands.into_iter().map(Identity::Command));
+            matches.extend(brew.packages.into_iter().map(Identity::Homebrew));
+        }
+        Self {
+            matches,
+            program_issues,
+            receipt_issues,
+        }
+    }
+
+    pub fn report(self, locations: &Locations, query: &str, selected: usize) -> Report {
+        let ambiguous = self.matches.len() > 1;
+        let identity = self.matches.into_iter().nth(selected);
+        let name_query = (!ambiguous
+            && !identity
+                .as_ref()
+                .is_some_and(Identity::matches_exact_identifier))
+        .then_some(query);
+        let mut issues = self.program_issues;
+        let main_program_check_incomplete = !issues.is_empty();
+        let path_check_incomplete = issues
+            .iter()
+            .any(|issue| matches!(issue.source, CheckSource::PathCommand));
+        let homebrew_check_incomplete = !ambiguous
+            && issues
+                .iter()
+                .any(|issue| matches!(issue.source, CheckSource::Homebrew));
+        issues.extend(self.receipt_issues);
+        let data_dirs = user_data_dirs(locations, &mut issues);
+        let mut receipt = ReceiptInspection::default();
+        let mut main_program = match &identity {
+            Some(Identity::Homebrew(package)) => MainProgram::from_check(
+                package.program_found,
+                package.check_incomplete
+                    || homebrew_check_incomplete
+                    || (package.checks_path && path_check_incomplete),
+            ),
+            Some(Identity::PackageReceipt(package)) => {
+                let before = issues.len();
+                let command_dirs = path_command_dirs(locations, &mut issues);
+                let incomplete = main_program_check_incomplete || issues.len() != before;
+                receipt = package.inspect(locations, &data_dirs, &command_dirs, &mut issues);
+                MainProgram::from_check(false, incomplete)
+                    .including(receipt.program_check.unwrap_or(MainProgram::NotFound))
+            }
+            Some(_) => MainProgram::Found,
+            None => MainProgram::from_check(false, main_program_check_incomplete),
+        };
+        let app = match &identity {
+            Some(Identity::Application(app)) => Some(app),
+            Some(Identity::Homebrew(package)) => package.single_application(),
+            _ => None,
+        };
+        let (registration, supplemental) = selection_evidence(locations, query);
+        let selection_program = match (&main_program, supplemental) {
+            (MainProgram::Found, _) | (_, MainProgram::Found) => MainProgram::Found,
+            (MainProgram::NotFound, MainProgram::NotFound) => MainProgram::NotFound,
+            _ => MainProgram::Incomplete,
+        };
+        let mut items = receipt.items;
+        let mut artifacts = find_artifacts(
+            &data_dirs,
+            locations,
+            name_query,
+            looks_like_bundle_id(query).then_some(ContainerQuery {
+                bundle_id: query,
+                ambiguous,
+            }),
+            app,
+            registration.as_deref(),
+            &mut issues,
+        );
+        let recorded_paths: HashSet<_> = items.iter().map(|item| item.path.as_path()).collect();
+        artifacts.retain(|item| !recorded_paths.contains(item.path.as_path()));
+        let container_program = artifacts.iter().find_map(|item| {
+            let Evidence::AppContainer { snapshot } = &item.evidence else {
+                return None;
+            };
+            Some(
+                if snapshot.is_ok() && !matches!(main_program, MainProgram::Found) {
+                    main_program.including(check_container_program(locations, query, &mut issues))
+                } else {
+                    main_program
+                },
+            )
+        });
+        if let Some(program) = container_program
+            && !ambiguous
+        {
+            main_program = program;
+        }
+        items.extend(artifacts);
+        items.extend(references::find(
+            locations,
+            name_query,
+            app.and_then(Application::identifier),
+            &mut issues,
+        ));
+        let program_items = match identity {
+            Some(Identity::Application(app)) => vec![app.into_item()],
+            Some(Identity::Command(command)) => vec![command],
+            Some(Identity::Homebrew(package)) => package.items,
+            Some(Identity::PackageReceipt(_)) | None => Vec::new(),
+        };
+        items.splice(..0, program_items);
+        Report {
+            main_program,
+            selection_program,
+            container_program,
+            items,
+            issues,
+        }
+    }
+}
+
+// A display identity can narrow discovery, but must not hide checks from cleanup.
+pub fn check_container_program(
+    locations: &Locations,
+    query: &str,
+    report_issues: &mut Vec<CheckIssue>,
+) -> MainProgram {
+    let mut issues = Vec::new();
+    let applications = find_applications(locations, query, true, &mut issues);
+    let mut path_dirs = path_command_dirs(locations, &mut issues);
+    for relative in [
+        "usr/bin",
+        "bin",
+        "usr/sbin",
+        "sbin",
+        "usr/local/bin",
+        "opt/homebrew/bin",
+    ] {
+        let directory = locations.system_root.join(relative);
+        if !path_dirs.contains(&directory) {
+            path_dirs.push(directory);
+        }
+    }
+    let commands = check_path_commands(&path_dirs, query, &mut issues);
+    let brew = homebrew::find_packages(locations, query, true, &mut issues);
+    let mut check = MainProgram::from_check(
+        !applications.is_empty()
+            || !commands.is_empty()
+            || !brew.unrecorded_commands.is_empty()
+            || brew.packages.iter().any(|package| package.program_found),
+        brew.packages.iter().any(|package| package.check_incomplete),
+    );
+    for receipt in receipt::find(locations, query, &mut issues) {
+        let inspection = receipt.inspect(locations, &[], &path_dirs, &mut issues);
+        if let Some(program_check) = inspection.program_check {
+            check = check.including(program_check);
+        }
+    }
+    check = check.including(MainProgram::from_check(false, !issues.is_empty()));
+    for issue in issues {
+        if !report_issues.iter().any(|known| {
+            known.source == issue.source
+                && known.path == issue.path
+                && known.error.to_string() == issue.error.to_string()
+        }) {
+            report_issues.push(issue);
+        }
+    }
+    check
+}
+
+fn find_path_commands(
+    locations: &Locations,
+    query: &str,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Item> {
+    check_path_commands(&path_command_dirs(locations, issues), query, issues)
+}
+
+fn path_command_dirs(locations: &Locations, issues: &mut Vec<CheckIssue>) -> Vec<PathBuf> {
+    locations
+        .path_dirs()
+        .into_iter()
+        .filter_map(|directory| {
+            if directory.is_absolute() {
+                return Some(directory);
+            }
+            match std::env::current_dir() {
+                Ok(current) => Some(current.join(directory)),
+                Err(error) => {
+                    issues.push(CheckIssue {
+                        source: CheckSource::PathCommand,
+                        path: directory,
+                        error,
+                    });
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+fn check_path_commands(
+    directories: &[PathBuf],
+    query: &str,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Item> {
+    let mut commands: Vec<Item> = Vec::new();
+    for directory in directories {
+        let path = directory.join(query);
+        if let Some(metadata) = checked_metadata(&path, CheckSource::PathCommand, issues)
+            && is_executable(&metadata)
+            && !commands.iter().any(|item| item.path == path)
+        {
+            commands.push(Item {
+                path,
+                kind: ArtifactKind::StandaloneCommand,
+                evidence: Evidence::PathCommand,
+                file_type: metadata.file_type(),
+                in_cleanup_scope: false,
+            });
+        }
+    }
+    commands
+}
+
+pub fn checked_metadata(
+    path: &Path,
+    source: CheckSource,
+    issues: &mut Vec<CheckIssue>,
+) -> Option<fs::Metadata> {
+    match check_path(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            issues.push(CheckIssue {
+                source,
+                path: path.to_path_buf(),
+                error,
+            });
+            None
+        }
+    }
+}
+
+pub fn is_executable(metadata: &fs::Metadata) -> bool {
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+fn find_applications(
+    locations: &Locations,
+    query: &str,
+    require_identifier: bool,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Application> {
+    let mut apps = Vec::new();
+    for directory in locations.application_dirs() {
+        for entry in entries(&directory, CheckSource::Applications, issues) {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|name| name.to_str());
+            if !has_app_extension(&path) {
+                continue;
+            }
+            let file_type = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => kind,
+                Ok(kind) if kind.is_symlink() => {
+                    issues.push(CheckIssue {
+                        source: CheckSource::Applications,
+                        path,
+                        error: io::Error::other("symbolic app bundle not followed"),
+                    });
+                    continue;
+                }
+                Ok(_) => continue,
+                Err(error) => {
+                    issues.push(CheckIssue {
+                        source: CheckSource::Applications,
+                        path,
+                        error,
+                    });
+                    continue;
+                }
+            };
+            let metadata = bundle_metadata(&path, issues);
+            if require_identifier
+                && metadata
+                    .as_ref()
+                    .is_some_and(|meta| meta.identifier.is_none())
+            {
+                issues.push(CheckIssue {
+                    source: CheckSource::BundleMetadata,
+                    path: path.join("Contents/Info.plist"),
+                    error: io::Error::other("application has no readable CFBundleIdentifier"),
+                });
+            }
+            let names = [
+                (
+                    metadata
+                        .as_ref()
+                        .and_then(|value| value.display_name.as_deref()),
+                    BundleMatch::DisplayName,
+                ),
+                (
+                    metadata.as_ref().and_then(|value| value.name.as_deref()),
+                    BundleMatch::Name,
+                ),
+                (stem, BundleMatch::DirectoryName),
+            ];
+            let matched_by = if metadata
+                .as_ref()
+                .and_then(|value| value.identifier.as_deref())
+                == Some(query)
+            {
+                Some(BundleMatch::Identifier)
+            } else {
+                names.into_iter().find_map(|(name, matched_by)| {
+                    name.filter(|name| same_name(name, query))
+                        .map(|_| matched_by)
+                })
+            };
+            if let Some(matched_by) = matched_by {
+                apps.push(Application {
+                    path,
+                    metadata,
+                    matched_by,
+                    file_type,
+                });
+            }
+        }
+    }
+    apps
+}
+
+pub fn bundle_metadata(path: &Path, issues: &mut Vec<CheckIssue>) -> Option<BundleMetadata> {
+    let metadata_path = path.join("Contents/Info.plist");
+    let error = match read_metadata(&metadata_path) {
+        Ok(parsed) if parsed.invalid_keys.is_empty() => return Some(parsed.metadata),
+        Ok(parsed) => {
+            issues.push(CheckIssue {
+                source: CheckSource::BundleMetadata,
+                path: metadata_path,
+                error: io::Error::other(format!(
+                    "Expected strings in {}",
+                    parsed.invalid_keys.join(", ")
+                )),
+            });
+            return Some(parsed.metadata);
+        }
+        Err(error) => error,
+    };
+    issues.push(CheckIssue {
+        source: CheckSource::BundleMetadata,
+        path: metadata_path,
+        error,
+    });
+    None
+}
+
+pub struct UserDataDirectory {
+    pub path: PathBuf,
+    pub kind: ArtifactKind,
+    suffix: Option<&'static str>,
+}
+
+fn user_data_dirs(locations: &Locations, issues: &mut Vec<CheckIssue>) -> Vec<UserDataDirectory> {
+    let home_dirs = [
+        (
+            "Library/Application Support",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        (
+            "Library/Preferences",
+            ArtifactKind::Preferences,
+            Some(".plist"),
+        ),
+        ("Library/Caches", ArtifactKind::Cache, None),
+        (CONTAINERS, ArtifactKind::ApplicationData, None),
+        (
+            "Library/Group Containers",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        ("Library/Logs", ArtifactKind::Logs, None),
+        (
+            "Library/Saved Application State",
+            ArtifactKind::State,
+            Some(".savedState"),
+        ),
+        (".config", ArtifactKind::Configuration, None),
+        (".local/share", ArtifactKind::ApplicationData, None),
+        (".local/state", ArtifactKind::State, None),
+        (".cache", ArtifactKind::Cache, None),
+    ]
+    .into_iter()
+    .map(|(relative, kind, suffix)| (locations.home.join(relative), kind, suffix));
+    let temp_dir = match locations.user_temp_dir() {
+        Ok(path) => Some((path, ArtifactKind::TemporaryData, None)),
+        Err(error) => {
+            issues.push(CheckIssue {
+                source: CheckSource::UserData,
+                path: PathBuf::from("DARWIN_USER_TEMP_DIR"),
+                error,
+            });
+            None
+        }
+    };
+    home_dirs
+        .chain(temp_dir)
+        .map(|(path, kind, suffix)| UserDataDirectory { path, kind, suffix })
+        .collect()
+}
+
+struct ContainerQuery<'a> {
+    bundle_id: &'a str,
+    ambiguous: bool,
+}
+
+fn find_artifacts(
+    data_dirs: &[UserDataDirectory],
+    locations: &Locations,
+    name_query: Option<&str>,
+    container_query: Option<ContainerQuery<'_>>,
+    app: Option<&Application>,
+    registration: Option<&Path>,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Item> {
+    let home = &locations.home;
+    let mut items = Vec::new();
+    if let Some(name) =
+        name_query.filter(|name| !name.starts_with('.') && !looks_like_bundle_id(name))
+    {
+        let path = home.join(format!(".{name}"));
+        if let Some(metadata) = checked_metadata(&path, CheckSource::UserData, issues)
+            && metadata.is_dir()
+        {
+            items.push(Item {
+                path,
+                kind: ArtifactKind::ApplicationData,
+                evidence: Evidence::FilenameMatch,
+                file_type: metadata.file_type(),
+                in_cleanup_scope: false,
+            });
+        }
+    }
+    for UserDataDirectory { path, kind, suffix } in data_dirs {
+        let relative_root = path.strip_prefix(home).ok().and_then(Path::to_str);
+        for entry in entries(path, CheckSource::UserData, issues) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let stem = suffix
+                .and_then(|suffix| name.strip_suffix(suffix))
+                .unwrap_or(name);
+            let in_containers = relative_root == Some(CONTAINERS) && looks_like_bundle_id(stem);
+            let matching_app = app.filter(|app| app.identifier() == Some(stem));
+            let query_match = container_query
+                .as_ref()
+                .filter(|query| in_containers && query.bundle_id == stem);
+            let is_app_container =
+                query_match.is_some() || (in_containers && matching_app.is_some());
+            let evidence = if let Some(app) = matching_app {
+                Evidence::BundleIdentifierFilename {
+                    identifier: stem.to_owned(),
+                    source: app.metadata_path(),
+                }
+            } else if name_query.is_some_and(|query| {
+                if looks_like_bundle_id(query) {
+                    stem == query
+                } else {
+                    same_name(stem, query)
+                }
+            }) || is_app_container
+            {
+                Evidence::FilenameMatch
+            } else {
+                continue;
+            };
+            match entry.metadata() {
+                Ok(metadata) => {
+                    let file_type = metadata.file_type();
+                    let path = entry.path();
+                    if is_app_container && file_type.is_dir() {
+                        let unassigned = matching_app.is_none()
+                            && query_match.is_some_and(|query| query.ambiguous);
+                        let evidence = if unassigned {
+                            Evidence::UnassignedContainer
+                        } else {
+                            Evidence::AppContainer {
+                                snapshot: Snapshot::inspect_container(locations, &path, &metadata),
+                            }
+                        };
+                        items.push(Item {
+                            path,
+                            kind: *kind,
+                            evidence,
+                            file_type,
+                            in_cleanup_scope: !unassigned,
+                        });
+                        continue;
+                    }
+                    let in_cleanup_scope = cfg!(feature = "test-fixtures")
+                        && match relative_root {
+                            Some("Library/Application Support" | "Library/Caches") => {
+                                file_type.is_dir()
+                            }
+                            Some("Library/Preferences") => name != stem && file_type.is_file(),
+                            _ => false,
+                        };
+                    let source =
+                        registration.filter(|_| in_cleanup_scope && name_query == Some(stem));
+                    let evidence =
+                        source.map_or(evidence, |source| Evidence::RegisteredBundleData {
+                            identifier: stem.to_owned(),
+                            source: source.to_owned(),
+                            app_data_root: path.clone(),
+                            snapshot: Snapshot::inspect(home, &path, &metadata),
+                        });
+                    items.push(Item {
+                        path: path.clone(),
+                        kind: *kind,
+                        evidence,
+                        file_type,
+                        in_cleanup_scope,
+                    });
+                    if let Some(source) = source
+                        && relative_root == Some("Library/Application Support")
+                    {
+                        for child in entries(&path, CheckSource::UserData, issues) {
+                            match child.metadata() {
+                                Ok(metadata) => {
+                                    let child_path = child.path();
+                                    let file_type = metadata.file_type();
+                                    let snapshot = Snapshot::inspect(home, &child_path, &metadata);
+                                    items.push(Item {
+                                        path: child_path,
+                                        kind: *kind,
+                                        evidence: Evidence::RegisteredBundleData {
+                                            identifier: stem.to_owned(),
+                                            source: source.to_owned(),
+                                            app_data_root: path.clone(),
+                                            snapshot,
+                                        },
+                                        file_type,
+                                        in_cleanup_scope: file_type.is_file() || file_type.is_dir(),
+                                    });
+                                }
+                                Err(error) => issues.push(CheckIssue {
+                                    source: CheckSource::UserData,
+                                    path: child.path(),
+                                    error,
+                                }),
+                            }
+                        }
+                    }
+                }
+                Err(error) => issues.push(CheckIssue {
+                    source: CheckSource::UserData,
+                    path: entry.path(),
+                    error,
+                }),
+            }
+        }
+    }
+    items
+}
+
+#[cfg(not(feature = "test-fixtures"))]
+fn selection_evidence(_: &Locations, _: &str) -> (Option<PathBuf>, MainProgram) {
+    // Supplemental main-program checks and independent registration are not yet available.
+    (None, MainProgram::Incomplete)
+}
+
+#[cfg(feature = "test-fixtures")]
+fn selection_evidence(locations: &Locations, query: &str) -> (Option<PathBuf>, MainProgram) {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+
+    if !looks_like_bundle_id(query) {
+        return (None, MainProgram::Incomplete);
+    }
+    let records = locations.system_root.join("var/db/lfd-fixtures");
+    let source = records.join(format!("{query}.plist"));
+    let registration = read_metadata(&source)
+        .ok()
+        .filter(|parsed| {
+            parsed.invalid_keys.is_empty() && parsed.metadata.identifier.as_deref() == Some(query)
+        })
+        .map(|_| source);
+
+    // Reproduce OS-boundary outcomes only. The real application-directory scan still runs.
+    let mut response = String::new();
+    let checks = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW_ANY | libc::O_NONBLOCK)
+        .open(records.join(format!("{query}.checks")))
+        .and_then(|file| {
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::other("not a regular fixture response"));
+            }
+            file.take(256).read_to_string(&mut response)
+        });
+    let supplemental = if checks.is_ok()
+        && response == "PATH: not found\nHomebrew: not found\nPackage receipts: not found\n"
+    {
+        MainProgram::NotFound
+    } else {
+        MainProgram::Incomplete
+    };
+    (registration, supplemental)
+}
+
+pub fn looks_like_bundle_id(query: &str) -> bool {
+    query.contains('.')
+        && query.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')
+        })
+}
+
+pub fn same_name(left: &str, right: &str) -> bool {
+    left.to_lowercase() == right.to_lowercase()
+}
+
+pub fn entries(
+    path: &Path,
+    source: CheckSource,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<fs::DirEntry> {
+    let entries = match check_path(path).and_then(|_| fs::read_dir(path)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            issues.push(CheckIssue {
+                source,
+                path: path.to_path_buf(),
+                error,
+            });
+            return Vec::new();
+        }
+    };
+    let mut readable = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => readable.push(entry),
+            Err(error) => issues.push(CheckIssue {
+                source,
+                path: path.to_path_buf(),
+                error,
+            }),
+        }
+    }
+    readable.sort_by_key(fs::DirEntry::file_name);
+    readable
+}

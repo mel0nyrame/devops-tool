@@ -25,6 +25,15 @@ _Avoid_: Private memory, virtual memory size
 **Unavailable metric**:
 A metric for which there is not enough information to report a meaningful value, distinct from a measured zero.
 
+### Uninstall leftover inspection
+
+**Leftover candidate**:
+An item with evidence of a link to an application whose main program was not found in the checked locations. It is not proof that the application is uninstalled or that the item is safe to remove.
+_Avoid_: Confirmed leftover, cleanup target
+
+**Related item**:
+An item with evidence of a link to an application whose main program was found.
+
 ### Distribution
 
 **Suite package**:
