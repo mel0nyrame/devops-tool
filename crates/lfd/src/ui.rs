@@ -373,6 +373,9 @@ fn evidence(item: &Item, report: &Report) -> String {
         Evidence::FilenameMatch => {
             text.push_str("Filename match only; application ownership not established.")
         }
+        Evidence::UnassignedContainer => text.push_str(
+            "Directory matches the queried Bundle ID.\nLinking it to the selected identity requires matching app metadata.",
+        ),
         Evidence::BundleIdentifierFilename { identifier, source } => text.push_str(&format!(
             "Filename matches the local CFBundleIdentifier: {}\nMetadata: {}",
             visible(identifier),

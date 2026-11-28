@@ -10,6 +10,8 @@ cargo run --locked --offline -p lfd
 
 Enter an application name, exact Bundle ID, command name, exact Homebrew package name, or exact `.pkg` package ID, then press `Enter`. `lfd` does not take command-line arguments or accept paths as queries. If distinct identities match, choose one with `↑`/`↓` and `Enter`; filename-only artifacts are not assigned to the chosen identity.
 
+If a container directory exactly matches the queried Bundle ID, it can also appear when several identities match. If the chosen identity has no matching application metadata, the container appears as a separate, view-only query match.
+
 Use `↑`/`↓` to browse the results on the left and read the full path, match evidence, type, and risk on the right. `PgUp`/`PgDn` scroll the evidence. Press `i` if locations could not be checked to inspect their paths and errors separately. Press `q` or `Esc` to quit from results; press `Esc` to quit from the search prompt.
 
 - **Related items**: a matching main program was found in the checked locations.
@@ -32,6 +34,8 @@ Use `↑`/`↓` to browse the results on the left and read the full path, match 
 Application-name comparisons ignore case. Bundle IDs from metadata match exactly, including case. If an exact metadata ID is found, it takes precedence over name matches. An artifact can match the exact Bundle ID from local metadata or the query by filename. Dotted queries shaped like Bundle IDs require an exact filename match. A typed identifier alone does not establish ownership. A path-name hit without matching metadata remains a filename-only match.
 
 An exact Bundle ID from app metadata narrows discovery to applications. Without an exact app metadata or registered `.pkg` ID match, `lfd` checks applications, `PATH`, and the Homebrew locations above. A Homebrew record provides the paths to check for the main program. Missing records do not stop other checks. Homebrew global locations are view-only. `lfd` does not invoke Homebrew, access the network, or run scripts.
+
+If a Caskroom directory matches the queried package name and its receipt is missing, the main-program check for that cask is incomplete. Press `i` to see the missing receipt path.
 
 Name lookup does not descend into user data directories or follow symbolic links, including command links on `PATH`. Matching user-data links can appear in the list with their targets uninspected. Missing search directories have no entries; read errors and failed metadata checks are reported separately. `lfd` does not search the whole home directory, browser data, or shell history.
 

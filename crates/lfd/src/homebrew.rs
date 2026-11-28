@@ -99,9 +99,7 @@ pub fn find_packages(
                 };
                 let mut scan = match kind {
                     HomebrewKind::Formula => find_formula(&path, query, require_records, issues),
-                    HomebrewKind::Cask => {
-                        find_cask(locations, &path, receipt_bundle_id, require_records, issues)
-                    }
+                    HomebrewKind::Cask => find_cask(locations, &path, receipt_bundle_id, issues),
                 };
                 matches
                     .unrecorded_commands
@@ -166,13 +164,13 @@ fn find_cask(
     locations: &Locations,
     cask: &Path,
     receipt_bundle_id: Option<&str>,
-    require_records: bool,
     issues: &mut Vec<CheckIssue>,
 ) -> PackageScan {
     let mut scan = PackageScan::default();
     let receipt = cask.join(".metadata").join(INSTALL_RECEIPT);
+    // A cask identified by name needs its record to locate the program.
     let Some((record, source, file_type)) =
-        installation_record(&receipt, receipt_bundle_id, require_records, issues)
+        installation_record(&receipt, receipt_bundle_id, true, issues)
     else {
         return scan;
     };
@@ -415,7 +413,7 @@ fn directory(entry: fs::DirEntry, issues: &mut Vec<CheckIssue>) -> Option<PathBu
 fn installation_record(
     path: &Path,
     receipt_bundle_id: Option<&str>,
-    required: bool,
+    missing_is_issue: bool,
     issues: &mut Vec<CheckIssue>,
 ) -> Option<(Retained<NSDictionary>, Retained<NSDictionary>, fs::FileType)> {
     let (record, file_type) = match read_installation_record(path) {
@@ -423,7 +421,7 @@ fn installation_record(
         // A missing receipt is only an issue after identifying the installation.
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
-                && (!required || receipt_bundle_id.is_some()) =>
+                && (!missing_is_issue || receipt_bundle_id.is_some()) =>
         {
             return None;
         }

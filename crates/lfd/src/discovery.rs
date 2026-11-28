@@ -69,6 +69,7 @@ pub enum Evidence {
     AppContainer {
         snapshot: io::Result<Snapshot>,
     },
+    UnassignedContainer,
     SharedReference {
         matched_term: String,
     },
@@ -93,6 +94,9 @@ impl Item {
             }
             Evidence::PackageReceipt { .. } | Evidence::PackageReceiptPath { .. } => {
                 return Some("a receipt does not establish current ownership or installation");
+            }
+            Evidence::UnassignedContainer => {
+                return Some("the query matched multiple identities");
             }
             _ => {}
         }
@@ -325,13 +329,19 @@ impl Search {
         let path_check_incomplete = issues
             .iter()
             .any(|issue| matches!(issue.source, CheckSource::PathCommand));
+        let homebrew_check_incomplete = !ambiguous
+            && issues
+                .iter()
+                .any(|issue| matches!(issue.source, CheckSource::Homebrew));
         issues.extend(self.receipt_issues);
         let data_dirs = user_data_dirs(locations, &mut issues);
         let mut receipt = ReceiptInspection::default();
         let mut main_program = match &identity {
             Some(Identity::Homebrew(package)) => MainProgram::from_check(
                 package.program_found,
-                package.check_incomplete || (package.checks_path && path_check_incomplete),
+                package.check_incomplete
+                    || homebrew_check_incomplete
+                    || (package.checks_path && path_check_incomplete),
             ),
             Some(Identity::PackageReceipt(package)) => {
                 let before = issues.len();
@@ -360,7 +370,10 @@ impl Search {
             &data_dirs,
             locations,
             name_query,
-            (!ambiguous && looks_like_bundle_id(query)).then_some(query),
+            looks_like_bundle_id(query).then_some(ContainerQuery {
+                bundle_id: query,
+                ambiguous,
+            }),
             app,
             registration.as_deref(),
             &mut issues,
@@ -700,11 +713,16 @@ fn user_data_dirs(locations: &Locations, issues: &mut Vec<CheckIssue>) -> Vec<Us
         .collect()
 }
 
+struct ContainerQuery<'a> {
+    bundle_id: &'a str,
+    ambiguous: bool,
+}
+
 fn find_artifacts(
     data_dirs: &[UserDataDirectory],
     locations: &Locations,
     name_query: Option<&str>,
-    container_query: Option<&str>,
+    container_query: Option<ContainerQuery<'_>>,
     app: Option<&Application>,
     registration: Option<&Path>,
     issues: &mut Vec<CheckIssue>,
@@ -719,11 +737,14 @@ fn find_artifacts(
             let stem = suffix
                 .and_then(|suffix| name.strip_suffix(suffix))
                 .unwrap_or(name);
-            let is_app_container = relative_root == Some(CONTAINERS)
-                && looks_like_bundle_id(stem)
-                && (container_query == Some(stem)
-                    || app.and_then(Application::identifier) == Some(stem));
-            let evidence = if let Some(app) = app.filter(|app| app.identifier() == Some(stem)) {
+            let in_containers = relative_root == Some(CONTAINERS) && looks_like_bundle_id(stem);
+            let matching_app = app.filter(|app| app.identifier() == Some(stem));
+            let query_match = container_query
+                .as_ref()
+                .filter(|query| in_containers && query.bundle_id == stem);
+            let is_app_container =
+                query_match.is_some() || (in_containers && matching_app.is_some());
+            let evidence = if let Some(app) = matching_app {
                 Evidence::BundleIdentifierFilename {
                     identifier: stem.to_owned(),
                     source: app.metadata_path(),
@@ -745,13 +766,21 @@ fn find_artifacts(
                     let file_type = metadata.file_type();
                     let path = entry.path();
                     if is_app_container && file_type.is_dir() {
-                        let snapshot = Snapshot::inspect_container(locations, &path, &metadata);
+                        let unassigned = matching_app.is_none()
+                            && query_match.is_some_and(|query| query.ambiguous);
+                        let evidence = if unassigned {
+                            Evidence::UnassignedContainer
+                        } else {
+                            Evidence::AppContainer {
+                                snapshot: Snapshot::inspect_container(locations, &path, &metadata),
+                            }
+                        };
                         items.push(Item {
                             path,
                             kind: *kind,
-                            evidence: Evidence::AppContainer { snapshot },
+                            evidence,
                             file_type,
-                            in_cleanup_scope: true,
+                            in_cleanup_scope: !unassigned,
                         });
                         continue;
                     }

@@ -84,4 +84,6 @@ cargo install --locked --path crates/rmem
 
 `lfd` 已在 macOS arm64（26.7.3）通过原生构建和冒烟检查；清理预览、确认和废纸篓移动使用隔离测试数据验证。`lfd` 不支持 Windows 或 Linux。
 
+macOS CI 会运行 `lfd` 的默认构建和隔离构建冒烟检查。
+
 [术语表](GLOSSARY.md) · [设计决策](docs/adr/)

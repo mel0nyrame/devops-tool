@@ -84,4 +84,6 @@ The `fsz` check expects **8 B** when the scan skips a nested directory symlink a
 
 `lfd` was built and smoke-tested natively on macOS arm64 (26.7.3). Cleanup preview, confirmation, and Trash moves were tested with isolated fixtures. `lfd` does not support Windows or Linux.
 
+The macOS CI job runs the `lfd` default and isolated smoke checks.
+
 [Glossary](GLOSSARY.md) · [Design decisions](docs/adr/)

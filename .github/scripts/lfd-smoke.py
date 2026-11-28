@@ -1316,6 +1316,30 @@ class FixtureTests(IsolatedTests):
         self.assertNotRegex(session.screen.text(), r"│ {1,3}Twin Installer +│")
         session.quit()
 
+    def test_shows_an_exact_container_without_attributing_it_to_a_chosen_receipt(self):
+        bundle_id = "org.lfd.sharedinstaller"
+        container = make_container(self.home, bundle_id)
+        for package_id in ("org.lfd.north", "org.lfd.south"):
+            receipt = make_receipt(self.root, package_id, bundle_id)
+            make_receipt_bom(receipt, [])
+        (self.home / "Library/Caches" / bundle_id).mkdir(parents=True)
+
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Choose one application")
+        session.send(b"\x1b[B\r")
+        session.expect("Registered .pkg receipt")
+        session.expect("Package ID: org.lfd.south")
+        self.assertNotIn("org.lfd.north", session.screen.text())
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(container)))
+        session.expect("Directory matches the queried Bundle ID")
+        session.expect("View only: the query matched multiple identities")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+
     def test_pkg_receipt_does_not_claim_a_different_app_at_its_old_path(self):
         receipt = make_receipt(self.root, "org.lfd.oldpkg", "Reused", "/Applications")
         make_receipt_bom(receipt, ["Reused.app"])
@@ -1553,6 +1577,36 @@ class CommandTests(IsolatedTests):
         session.expect("not proof of a current main program")
         session.quit()
         self.assertTrue(receipt.is_file())
+
+    def test_named_cask_with_a_missing_record_leaves_the_check_incomplete(self):
+        cask = self.root / "opt/homebrew/Caskroom/lost-cask"
+        app = make_app(cask / "1.0", "Staged.app", "Staged", "org.lfd.staged")
+        cache = self.home / "Library/Caches" / cask.name
+        cache.mkdir(parents=True)
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        session = self.start()
+        session.search(cask.name)
+        session.expect("Main program check incomplete")
+        session.expect("Possible matches")
+        session.expect(re.escape(str(cache)))
+        self.assertNotIn(app.name, session.screen.text())
+        session.send(b"i")
+        session.expect(re.escape(str(receipt)))
+        session.expect("Homebrew location or record")
+        session.quit()
+        self.assertFalse(receipt.exists())
+        self.assertTrue(app.is_dir())
+
+        other_receipt = self.root / "usr/local/Caskroom" / cask.name / ".metadata/INSTALL_RECEIPT.json"
+        other_receipt.parent.mkdir(parents=True)
+        other_receipt.write_text(json.dumps({
+            "source": {"version": "1.0"}, "uninstall_artifacts": [{"app": ["Absent.app"]}],
+        }))
+        session = self.start()
+        session.search(cask.name)
+        session.expect("Possible matches")
+        session.expect(re.escape(str(other_receipt)))
+        session.quit()
 
     def test_unknown_program_reports_a_blocked_path_check_without_following_it(self):
         target = self.root / "not-on-path"
