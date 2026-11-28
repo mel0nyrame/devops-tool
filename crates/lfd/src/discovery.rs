@@ -1,3 +1,5 @@
+mod references;
+
 use std::{
     fs, io,
     os::unix::fs::PermissionsExt,
@@ -18,6 +20,12 @@ pub enum ArtifactKind {
     ApplicationData,
     Preferences,
     Cache,
+    Configuration,
+    State,
+    Logs,
+    TemporaryData,
+    SharedConfiguration,
+    ExtensionSource,
 }
 
 pub enum BundleMatch {
@@ -36,6 +44,7 @@ pub enum Evidence {
     UnrecordedHomebrewCommand,
     FilenameMatch,
     BundleIdentifierFilename { identifier: String, source: PathBuf },
+    SharedReference { matched_term: String },
 }
 
 pub struct Item {
@@ -52,6 +61,7 @@ pub enum CheckSource {
     PathCommand,
     Homebrew,
     UserData,
+    ReferenceContent,
 }
 
 pub struct CheckIssue {
@@ -198,6 +208,12 @@ impl ProgramCheck {
             && !app.is_some_and(|app| matches!(app.matched_by, BundleMatch::Identifier)))
         .then_some(query);
         let mut items = find_artifacts(locations, name_query, app, &mut issues);
+        items.extend(references::find(
+            locations,
+            name_query,
+            app.and_then(Application::identifier),
+            &mut issues,
+        ));
         let program_items = match identity {
             Some(ProgramIdentity::Application(app)) => vec![app.into_item()],
             Some(ProgramIdentity::Command(command)) => vec![command],
@@ -381,23 +397,55 @@ fn find_artifacts(
     issues: &mut Vec<CheckIssue>,
 ) -> Vec<Item> {
     let mut items = Vec::new();
-    for (relative, kind) in [
-        ("Library/Application Support", ArtifactKind::ApplicationData),
-        ("Library/Preferences", ArtifactKind::Preferences),
-        ("Library/Caches", ArtifactKind::Cache),
-    ] {
-        for entry in entries(
-            &locations.home.join(relative),
-            CheckSource::UserData,
-            issues,
-        ) {
+    let home_dirs = [
+        (
+            "Library/Application Support",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        (
+            "Library/Preferences",
+            ArtifactKind::Preferences,
+            Some(".plist"),
+        ),
+        ("Library/Caches", ArtifactKind::Cache, None),
+        ("Library/Containers", ArtifactKind::ApplicationData, None),
+        (
+            "Library/Group Containers",
+            ArtifactKind::ApplicationData,
+            None,
+        ),
+        ("Library/Logs", ArtifactKind::Logs, None),
+        (
+            "Library/Saved Application State",
+            ArtifactKind::State,
+            Some(".savedState"),
+        ),
+        (".config", ArtifactKind::Configuration, None),
+        (".local/share", ArtifactKind::ApplicationData, None),
+        (".local/state", ArtifactKind::State, None),
+        (".cache", ArtifactKind::Cache, None),
+    ]
+    .into_iter()
+    .map(|(relative, kind, suffix)| (locations.home.join(relative), kind, suffix));
+    let temp_dir = match locations.user_temp_dir() {
+        Ok(path) => Some((path, ArtifactKind::TemporaryData, None)),
+        Err(error) => {
+            issues.push(CheckIssue {
+                source: CheckSource::UserData,
+                path: PathBuf::from("DARWIN_USER_TEMP_DIR"),
+                error,
+            });
+            None
+        }
+    };
+    for (directory, kind, suffix) in home_dirs.chain(temp_dir) {
+        for entry in entries(&directory, CheckSource::UserData, issues) {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let stem = if matches!(kind, ArtifactKind::Preferences) {
-                name.strip_suffix(".plist").unwrap_or(name)
-            } else {
-                name
-            };
+            let stem = suffix
+                .and_then(|suffix| name.strip_suffix(suffix))
+                .unwrap_or(name);
             let evidence = if let Some(app) = app.filter(|app| app.identifier() == Some(stem)) {
                 Evidence::BundleIdentifierFilename {
                     identifier: stem.to_owned(),
