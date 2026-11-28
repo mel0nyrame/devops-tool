@@ -105,6 +105,26 @@ def make_app(directory, filename, name, bundle_id, *, binary_plist=False):
     return bundle
 
 
+def make_receipt(root, package_id, name, prefix="/"):
+    receipt = root / "private" / "var" / "db" / "receipts" / f"{package_id}.plist"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_bytes(plistlib.dumps({
+        "PackageIdentifier": package_id,
+        "PackageFileName": f"{name}.pkg",
+        "InstallPrefixPath": prefix,
+    }))
+    return receipt
+
+
+def make_receipt_bom(receipt, paths):
+    with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+        listing = Path(directory) / "paths"
+        listing.write_text(".\n" + "".join(f"./{path}\n" for path in paths))
+        bom = receipt.with_suffix(".bom")
+        subprocess.run(["/usr/bin/mkbom", "-s", "-i", str(listing), str(bom)], check=True)
+        return bom
+
+
 class IsolatedTests(unittest.TestCase):
     def setUp(self):
         fixture = tempfile.TemporaryDirectory(prefix="lfd-", dir="/private/tmp")
@@ -416,6 +436,159 @@ class FixtureTests(IsolatedTests):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("LFD_TEST_ROOT", result.stderr)
                 self.assertNotIn("Application name or Bundle ID", result.stdout)
+
+    def test_exact_pkg_identifier_shows_registered_receipt_as_view_only(self):
+        receipt = make_receipt(self.root, "org.lfd.receipt", "Receipt Tool")
+        original = receipt.read_bytes()
+        session = self.start()
+        session.search("org.lfd.receipt")
+        session.expect("Main program not found in the checked locations")
+        session.expect(re.escape(str(receipt)))
+        session.expect("Registered .pkg receipt")
+        session.expect(r"Package ID: org\.lfd\.receipt")
+        session.expect("View only")
+        session.expect("historical evidence")
+        session.quit()
+        self.assertEqual(receipt.read_bytes(), original)
+
+    def test_pkg_receipt_shows_only_existing_paths_in_the_fixed_scope(self):
+        receipt = make_receipt(self.root, "org.lfd.paths", "Path Tool", "home/Library")
+        caches = self.home / "Library" / "Caches"
+        caches.mkdir(parents=True)
+        current = caches / "Remembered Data"
+        current.mkdir()
+        missing = caches / "Missing Data"
+        nested = current / "Hidden Data"
+        nested.write_text("nested")
+        outside = self.home / "Library" / "Unlisted Data"
+        outside.write_text("outside")
+        log = self.home / "Library" / "Logs" / "Recorded Log"
+        log.parent.mkdir()
+        log.write_text("retained log")
+        bom = make_receipt_bom(receipt, [
+            "Caches", "Caches/Remembered Data", "Caches/Missing Data", "Caches/Remembered Data/Hidden Data",
+            "Unlisted Data", "Logs", "Logs/Recorded Log",
+        ])
+        original_bom = bom.read_bytes()
+        session = self.start()
+        session.search("org.lfd.paths")
+        session.expect("Registered .pkg receipt")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(current)))
+        session.expect("Recorded by the registered .pkg receipt")
+        session.expect("View only")
+        for path in (missing, nested, outside):
+            self.assertNotIn(path.name, session.screen.text())
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(log)))
+        session.expect("Recorded by the registered .pkg receipt")
+        session.quit()
+        self.assertTrue(current.is_dir())
+        self.assertEqual(outside.read_text(), "outside")
+        self.assertEqual(nested.read_text(), "nested")
+        self.assertEqual(log.read_text(), "retained log")
+        self.assertFalse(missing.exists())
+        self.assertEqual(bom.read_bytes(), original_bom)
+
+    def test_chooses_one_same_named_pkg_receipt_without_merging_paths(self):
+        first = make_receipt(self.root, "org.lfd.north", "Twin Installer", "/home/Library/Caches")
+        second = make_receipt(self.root, "org.lfd.south", "Twin Installer", "/home/Library/Caches")
+        caches = self.home / "Library" / "Caches"
+        caches.mkdir(parents=True)
+        for name in ("North Data", "South Data", "Twin Installer"):
+            (caches / name).write_text(name)
+        make_receipt_bom(first, ["North Data"])
+        make_receipt_bom(second, ["South Data"])
+        session = self.start()
+        session.search("twin installer")
+        session.expect("Choose one application")
+        for text in ("org.lfd.north", "org.lfd.south", str(first), str(second)):
+            session.expect(re.escape(text))
+        session.send(b"\x1b[B\r")
+        session.expect("Registered .pkg receipt")
+        session.expect(re.escape(str(second)))
+        session.expect("South Data")
+        self.assertNotIn("North Data", session.screen.text())
+        self.assertNotIn("org.lfd.north", session.screen.text())
+        self.assertNotRegex(session.screen.text(), r"│ {1,3}Twin Installer +│")
+        session.quit()
+
+    def test_pkg_receipt_does_not_claim_a_different_app_at_its_old_path(self):
+        receipt = make_receipt(self.root, "org.lfd.oldpkg", "Reused", "/Applications")
+        make_receipt_bom(receipt, ["Reused.app"])
+        bundle = make_app(self.root / "Applications", "Reused.app", "Reused", "org.lfd.newapp")
+        data = self.home / "Library" / "Caches" / "org.lfd.newapp"
+        data.mkdir(parents=True)
+        session = self.start()
+        session.search("org.lfd.oldpkg")
+        session.expect("Main program check incomplete")
+        session.expect("Possible matches")
+        session.expect("Registered .pkg receipt")
+        session.expect("View only")
+        self.assertNotIn(bundle.name, session.screen.text())
+        self.assertNotIn("org.lfd.newapp", session.screen.text())
+        session.send(b"i")
+        session.expect(re.escape(str(bundle)))
+        session.expect("current Bundle ID org.lfd.newapp could not be tied to the selected receipt")
+        session.quit()
+        self.assertTrue(data.is_dir())
+
+    def test_pkg_receipt_marks_a_replaced_app_path_uncheckable(self):
+        receipt = make_receipt(self.root, "org.lfd.replaced", "Replacement Tool", "/Applications")
+        make_receipt_bom(receipt, ["Replaced.app"])
+        path = self.root / "Applications" / "Replaced.app"
+        path.parent.mkdir()
+        path.write_text("not an app bundle")
+        session = self.start()
+        session.search("org.lfd.replaced")
+        session.expect("Main program check incomplete")
+        session.expect("Registered .pkg receipt")
+        session.expect("View only")
+        self.assertNotIn(path.name, session.screen.text())
+        session.send(b"i")
+        session.expect(re.escape(str(path)))
+        session.expect("recorded .app path is not an application directory")
+        session.quit()
+        self.assertEqual(path.read_text(), "not an app bundle")
+
+    def test_pkg_receipt_corroborates_a_live_app_with_a_different_bundle_id(self):
+        receipt = make_receipt(self.root, "org.lfd.installer", "Corroborated", "/Applications")
+        applications = self.root / "Applications"
+        bundle = make_app(applications, "Corroborated.app", "Corroborated", "org.lfd.liveapp")
+        metadata = bundle / "Contents" / "Info.plist"
+        original = metadata.read_bytes()
+        subprocess.run([
+            "/usr/bin/mkbom", str(applications), str(receipt.with_suffix(".bom")),
+        ], check=True)
+        session = self.start()
+        session.search("org.lfd.installer")
+        session.expect("Main program found in the checked locations")
+        session.expect("Related items")
+        session.expect("Registered .pkg receipt")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(bundle)))
+        session.expect("Verified current Bundle ID: org.lfd.liveapp")
+        session.expect("View only")
+        session.quit()
+        self.assertEqual(metadata.read_bytes(), original)
+
+    def test_pkg_id_requires_exact_case_and_falls_back_without_a_receipt_match(self):
+        receipt = make_receipt(self.root, "org.lfd.case", "org.lfd.case")
+        unrelated = self.home / "Downloads" / "Org.Lfd.Case.pkg"
+        unrelated.parent.mkdir()
+        unrelated.write_bytes(receipt.read_bytes())
+        cache = self.home / "Library" / "Caches" / "Org.Lfd.Case"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("retained")
+        session = self.start()
+        session.search("Org.Lfd.Case")
+        session.expect("Leftover candidates")
+        session.expect(re.escape(str(cache)))
+        session.expect("Filename match only")
+        self.assertNotIn("Registered .pkg receipt", session.screen.text())
+        session.quit()
+        self.assertEqual(cache.read_text(), "retained")
+        self.assertEqual(unrelated.read_bytes(), receipt.read_bytes())
 
 
 class CommandTests(IsolatedTests):

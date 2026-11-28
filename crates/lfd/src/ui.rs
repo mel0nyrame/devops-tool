@@ -8,21 +8,21 @@ use ratatui::{
 };
 
 use crate::discovery::{
-    ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Item, MainProgram,
-    ProgramIdentity, Report,
+    ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Identity, Item, MainProgram,
+    Report,
 };
 
 pub fn draw_search(frame: &mut Frame, input: &str, error: &str) {
     let input = visible(input);
     let text = format!(
-        "Application name or Bundle ID, command name, or Homebrew package name:\n> {input}\n\n{error}\n\nEnter search / Esc quit"
+        "Application name or Bundle ID, command name, Homebrew package name, or .pkg package ID:\n> {input}\n\n{error}\n\nEnter search / Esc quit"
     );
     frame.render_widget(panel(text, " lfd · read-only inspection ", 0), frame.area());
 }
 
 pub fn draw_choices(
     frame: &mut Frame,
-    identities: &[ProgramIdentity],
+    identities: &[Identity],
     selection: &mut ListState,
     scroll: u16,
 ) {
@@ -43,7 +43,7 @@ pub fn draw_choices(
             identity_label(identity),
             display_path(identity.path())
         );
-        if let ProgramIdentity::Homebrew(package) = identity {
+        if let Identity::Homebrew(package) = identity {
             if let Some(app) = package.single_application() {
                 details.push_str(&format!(
                     "\n\nBundle ID: {}\n{}",
@@ -57,19 +57,22 @@ pub fn draw_choices(
     frame.render_widget(Paragraph::new("↑/↓ browse · PgUp/PgDn details · Enter choose · q / Esc quit\nName-only artifacts are not assigned to a selected identity."), footer);
 }
 
-fn identity_label(identity: &ProgramIdentity) -> String {
+fn identity_label(identity: &Identity) -> String {
     match identity {
-        ProgramIdentity::Application(app) => {
+        Identity::Application(app) => {
             format!(
                 "Bundle ID: {}",
                 visible(app.identifier().unwrap_or("unavailable"))
             )
         }
-        ProgramIdentity::Command(item) => format!(
+        Identity::PackageReceipt(receipt) => {
+            format!("Package ID: {}", visible(&receipt.identifier))
+        }
+        Identity::Command(item) => format!(
             "Executable: {}",
             visible(&item.path.file_name().unwrap_or_default().to_string_lossy())
         ),
-        ProgramIdentity::Homebrew(package) => format!(
+        Identity::Homebrew(package) => format!(
             "Homebrew {}: {}",
             package.kind.name(),
             visible(
@@ -146,6 +149,8 @@ pub fn draw_issues(
             CheckSource::PathCommand => "PATH command check",
             CheckSource::Homebrew => "Homebrew location or record",
             CheckSource::UserData => "User data location",
+            CheckSource::PackageReceipts => "Registered .pkg receipts",
+            CheckSource::PackageReceiptPaths => "Path recorded by a registered .pkg receipt",
             CheckSource::ReferenceContent => "Shared reference source",
         };
         let reason = if issue.error.raw_os_error() == Some(libc::ELOOP) {
@@ -201,6 +206,7 @@ fn evidence(item: &Item) -> String {
         ArtifactKind::ApplicationData => ("Application data", "may contain retained user data"),
         ArtifactKind::Preferences => ("Preferences", "may contain retained settings"),
         ArtifactKind::Cache => ("Cache", "contents and ownership have not been verified"),
+        ArtifactKind::PackageReceipt => ("Registered .pkg receipt", "historical evidence only"),
         ArtifactKind::Configuration => ("Configuration", "may contain retained settings"),
         ArtifactKind::State => ("State", "may contain retained sessions or user data"),
         ArtifactKind::Logs => ("Logs", "may contain retained activity records"),
@@ -262,6 +268,36 @@ fn evidence(item: &Item) -> String {
         Evidence::UnrecordedHomebrewCommand => text.push_str(
             "Executable name matches the query. No local Homebrew installation record;\napplication ownership not established.\nHomebrew global location: view-only.",
         ),
+        Evidence::PackageReceipt {
+            identifier,
+            matched_package_filename,
+        } => {
+            text.push_str(&format!("Package ID: {}\n", visible(identifier)));
+            if let Some(filename) = matched_package_filename {
+                text.push_str(&format!(
+                    "Matched registered installer filename: {}\n",
+                    visible(filename)
+                ));
+            }
+            text.push_str("View only: does not establish current ownership or installation.");
+        }
+        Evidence::PackageReceiptPath {
+            identifier,
+            receipt,
+            verified_bundle_id,
+        } => {
+            text.push_str(&format!(
+                "Recorded by the registered .pkg receipt for {}.\nReceipt: {}\nView only: the path exists, but the receipt does not establish current ownership or installation.",
+                visible(identifier),
+                display_path(receipt),
+            ));
+            if let Some(bundle_id) = verified_bundle_id {
+                text.push_str(&format!(
+                    "\nVerified current Bundle ID: {}",
+                    visible(bundle_id)
+                ));
+            }
+        }
         Evidence::FilenameMatch => {
             text.push_str("Filename match only; application ownership not established.")
         }

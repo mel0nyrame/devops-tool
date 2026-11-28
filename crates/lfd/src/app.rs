@@ -4,14 +4,14 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, widgets::ListState};
 
 use crate::{
-    discovery::{ProgramCheck, Report},
+    discovery::{Report, Search},
     locations::Locations,
     ui,
 };
 
 enum View {
     Search,
-    Choose(ProgramCheck),
+    Choose(Search),
     Results(Report),
 }
 
@@ -70,11 +70,11 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                 KeyCode::Enter => {
                     let query = input.trim();
                     if query.is_empty() {
-                        error = "Enter a non-empty application name or Bundle ID, or a command or package name.";
+                        error = "Enter a non-empty application name or Bundle ID, command name, or package name or ID.";
                     } else if query.contains(['/', '\\']) || matches!(query, "." | ".." | "~") {
                         error = "Enter a name or exact identifier, not a path.";
                     } else {
-                        let check = ProgramCheck::run(locations, query);
+                        let check = Search::run(locations, query);
                         view = if check.matches.len() > 1 {
                             View::Choose(check)
                         } else {

@@ -1,6 +1,7 @@
 mod references;
 
 use std::{
+    collections::HashSet,
     fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -10,6 +11,7 @@ use crate::{
     bundle::{BundleMetadata, read_metadata},
     homebrew::{self, HomebrewKind, HomebrewPackage},
     locations::{Locations, check_path},
+    receipt::{self, Receipt, ReceiptInspection},
 };
 
 #[derive(Clone, Copy)]
@@ -20,6 +22,7 @@ pub enum ArtifactKind {
     ApplicationData,
     Preferences,
     Cache,
+    PackageReceipt,
     Configuration,
     State,
     Logs,
@@ -42,9 +45,23 @@ pub enum Evidence {
     HomebrewRecord(HomebrewKind),
     HomebrewProgram(PathBuf),
     UnrecordedHomebrewCommand,
+    PackageReceipt {
+        identifier: String,
+        matched_package_filename: Option<String>,
+    },
+    PackageReceiptPath {
+        identifier: String,
+        receipt: PathBuf,
+        verified_bundle_id: Option<String>,
+    },
     FilenameMatch,
-    BundleIdentifierFilename { identifier: String, source: PathBuf },
-    SharedReference { matched_term: String },
+    BundleIdentifierFilename {
+        identifier: String,
+        source: PathBuf,
+    },
+    SharedReference {
+        matched_term: String,
+    },
 }
 
 pub struct Item {
@@ -61,6 +78,8 @@ pub enum CheckSource {
     PathCommand,
     Homebrew,
     UserData,
+    PackageReceipts,
+    PackageReceiptPaths,
     ReferenceContent,
 }
 
@@ -119,95 +138,124 @@ impl Application {
     }
 }
 
-pub enum ProgramIdentity {
+pub enum Identity {
     Application(Application),
     Command(Item),
     Homebrew(HomebrewPackage),
+    PackageReceipt(Receipt),
 }
 
-impl ProgramIdentity {
+impl Identity {
+    fn matches_exact_identifier(&self) -> bool {
+        match self {
+            Self::Application(app) => matches!(app.matched_by, BundleMatch::Identifier),
+            Self::PackageReceipt(receipt) => receipt.exact,
+            _ => false,
+        }
+    }
+
     pub fn path(&self) -> &Path {
         match self {
             Self::Application(app) => &app.path,
             Self::Command(item) => &item.path,
             Self::Homebrew(package) => &package.path,
+            Self::PackageReceipt(receipt) => &receipt.path,
         }
     }
 }
 
-pub struct ProgramCheck {
-    pub matches: Vec<ProgramIdentity>,
-    issues: Vec<CheckIssue>,
+pub struct Search {
+    pub matches: Vec<Identity>,
+    program_issues: Vec<CheckIssue>,
+    receipt_issues: Vec<CheckIssue>,
 }
 
-impl ProgramCheck {
+impl Search {
     pub fn run(locations: &Locations, query: &str) -> Self {
-        let mut issues = Vec::new();
-        let mut apps = find_applications(locations, query, &mut issues);
-        let exact_bundle_id = apps
-            .iter()
-            .any(|app| matches!(app.matched_by, BundleMatch::Identifier));
-        if exact_bundle_id {
-            apps.retain(|app| matches!(app.matched_by, BundleMatch::Identifier));
-        }
-        let mut brew = homebrew::HomebrewMatches::default();
-        let mut commands = Vec::new();
-        if !exact_bundle_id {
-            brew = homebrew::find_packages(locations, query, &mut issues);
-            commands = find_path_commands(locations, query, &mut issues);
-        }
-        let belongs_to_package = |path: &Path| {
-            brew.packages
-                .iter()
-                .any(|package| package.items.iter().any(|item| item.path == path))
-        };
-        let mut matches: Vec<_> = apps
+        let mut program_issues = Vec::new();
+        let mut receipt_issues = Vec::new();
+        let mut matches: Vec<_> = find_applications(locations, query, &mut program_issues)
             .into_iter()
-            .filter(|app| !belongs_to_package(&app.path))
-            .map(ProgramIdentity::Application)
+            .map(Identity::Application)
+            .chain(
+                receipt::find(locations, query, &mut receipt_issues)
+                    .into_iter()
+                    .map(Identity::PackageReceipt),
+            )
             .collect();
-        commands.retain(|command| {
-            !belongs_to_package(&command.path)
-                && !brew
-                    .unrecorded_commands
+        if matches.iter().any(Identity::matches_exact_identifier) {
+            matches.retain(Identity::matches_exact_identifier);
+        } else {
+            let brew = homebrew::find_packages(locations, query, &mut program_issues);
+            let commands = find_path_commands(locations, query, &mut program_issues);
+            let belongs_to_package = |path: &Path| {
+                brew.packages
                     .iter()
-                    .any(|other| command.path == other.path)
-        });
-        matches.extend(
-            commands
-                .into_iter()
-                .chain(brew.unrecorded_commands)
-                .map(ProgramIdentity::Command),
-        );
-        matches.extend(brew.packages.into_iter().map(ProgramIdentity::Homebrew));
-        Self { matches, issues }
+                    .any(|package| package.items.iter().any(|item| item.path == path))
+            };
+            matches.retain(|identity| !belongs_to_package(identity.path()));
+            matches.extend(
+                commands
+                    .into_iter()
+                    .filter(|command| {
+                        !belongs_to_package(&command.path)
+                            && !brew
+                                .unrecorded_commands
+                                .iter()
+                                .any(|other| command.path == other.path)
+                    })
+                    .map(Identity::Command),
+            );
+            matches.extend(brew.unrecorded_commands.into_iter().map(Identity::Command));
+            matches.extend(brew.packages.into_iter().map(Identity::Homebrew));
+        }
+        Self {
+            matches,
+            program_issues,
+            receipt_issues,
+        }
     }
 
     pub fn report(self, locations: &Locations, query: &str, selected: usize) -> Report {
         let ambiguous = self.matches.len() > 1;
-        let mut issues = self.issues;
         let identity = self.matches.into_iter().nth(selected);
+        let name_query = (!ambiguous
+            && !identity
+                .as_ref()
+                .is_some_and(Identity::matches_exact_identifier))
+        .then_some(query);
+        let mut issues = self.program_issues;
+        let main_program_check_incomplete = !issues.is_empty();
+        let path_check_incomplete = issues
+            .iter()
+            .any(|issue| matches!(issue.source, CheckSource::PathCommand));
+        issues.extend(self.receipt_issues);
+        let data_dirs = user_data_dirs(locations, &mut issues);
+        let mut receipt = ReceiptInspection::default();
         let main_program = match &identity {
-            Some(ProgramIdentity::Homebrew(package)) => MainProgram::from_check(
+            Some(Identity::Homebrew(package)) => MainProgram::from_check(
                 package.program_found,
-                package.check_incomplete
-                    || (package.checks_path
-                        && issues
-                            .iter()
-                            .any(|issue| matches!(issue.source, CheckSource::PathCommand))),
+                package.check_incomplete || (package.checks_path && path_check_incomplete),
             ),
+            Some(Identity::PackageReceipt(package)) => {
+                receipt = package.inspect(locations, &data_dirs, &mut issues);
+                receipt.application_check.unwrap_or_else(|| {
+                    MainProgram::from_check(false, main_program_check_incomplete)
+                })
+            }
             Some(_) => MainProgram::Found,
-            None => MainProgram::from_check(false, !issues.is_empty()),
+            None => MainProgram::from_check(false, main_program_check_incomplete),
         };
         let app = match &identity {
-            Some(ProgramIdentity::Application(app)) => Some(app),
-            Some(ProgramIdentity::Homebrew(package)) => package.single_application(),
+            Some(Identity::Application(app)) => Some(app),
+            Some(Identity::Homebrew(package)) => package.single_application(),
             _ => None,
         };
-        let name_query = (!ambiguous
-            && !app.is_some_and(|app| matches!(app.matched_by, BundleMatch::Identifier)))
-        .then_some(query);
-        let mut items = find_artifacts(locations, name_query, app, &mut issues);
+        let mut items = receipt.items;
+        let mut artifacts = find_artifacts(&data_dirs, name_query, app, &mut issues);
+        let recorded_paths: HashSet<_> = items.iter().map(|item| item.path.as_path()).collect();
+        artifacts.retain(|item| !recorded_paths.contains(item.path.as_path()));
+        items.extend(artifacts);
         items.extend(references::find(
             locations,
             name_query,
@@ -215,10 +263,10 @@ impl ProgramCheck {
             &mut issues,
         ));
         let program_items = match identity {
-            Some(ProgramIdentity::Application(app)) => vec![app.into_item()],
-            Some(ProgramIdentity::Command(command)) => vec![command],
-            Some(ProgramIdentity::Homebrew(package)) => package.items,
-            None => Vec::new(),
+            Some(Identity::Application(app)) => vec![app.into_item()],
+            Some(Identity::Command(command)) => vec![command],
+            Some(Identity::Homebrew(package)) => package.items,
+            Some(Identity::PackageReceipt(_)) | None => Vec::new(),
         };
         items.splice(..0, program_items);
         Report {
@@ -390,13 +438,13 @@ pub fn bundle_metadata(path: &Path, issues: &mut Vec<CheckIssue>) -> Option<Bund
     None
 }
 
-fn find_artifacts(
-    locations: &Locations,
-    name_query: Option<&str>,
-    app: Option<&Application>,
-    issues: &mut Vec<CheckIssue>,
-) -> Vec<Item> {
-    let mut items = Vec::new();
+pub struct UserDataDirectory {
+    pub path: PathBuf,
+    pub kind: ArtifactKind,
+    suffix: Option<&'static str>,
+}
+
+fn user_data_dirs(locations: &Locations, issues: &mut Vec<CheckIssue>) -> Vec<UserDataDirectory> {
     let home_dirs = [
         (
             "Library/Application Support",
@@ -439,8 +487,21 @@ fn find_artifacts(
             None
         }
     };
-    for (directory, kind, suffix) in home_dirs.chain(temp_dir) {
-        for entry in entries(&directory, CheckSource::UserData, issues) {
+    home_dirs
+        .chain(temp_dir)
+        .map(|(path, kind, suffix)| UserDataDirectory { path, kind, suffix })
+        .collect()
+}
+
+fn find_artifacts(
+    data_dirs: &[UserDataDirectory],
+    name_query: Option<&str>,
+    app: Option<&Application>,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Item> {
+    let mut items = Vec::new();
+    for UserDataDirectory { path, kind, suffix } in data_dirs {
+        for entry in entries(path, CheckSource::UserData, issues) {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let stem = suffix
@@ -465,7 +526,7 @@ fn find_artifacts(
             match entry.file_type() {
                 Ok(file_type) => items.push(Item {
                     path: entry.path(),
-                    kind,
+                    kind: *kind,
                     evidence,
                     symbolic_link: file_type.is_symlink(),
                 }),
@@ -490,7 +551,7 @@ fn looks_like_bundle_id(query: &str) -> bool {
         })
 }
 
-fn same_name(left: &str, right: &str) -> bool {
+pub fn same_name(left: &str, right: &str) -> bool {
     left.to_lowercase() == right.to_lowercase()
 }
 

@@ -9,6 +9,10 @@ mod homebrew;
 #[cfg(target_os = "macos")]
 mod locations;
 #[cfg(target_os = "macos")]
+mod plist;
+#[cfg(target_os = "macos")]
+mod receipt;
+#[cfg(target_os = "macos")]
 mod ui;
 
 #[cfg(target_os = "macos")]
