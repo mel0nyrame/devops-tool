@@ -2,7 +2,7 @@
 
 [简体中文](2026-11-28-macos-uninstall-leftovers.zh.md)
 
-Status: accepted
+Status: implemented
 
 ## Problem
 
@@ -32,7 +32,7 @@ The maintainer also selected these discovery and cleanup rules:
 - Before moving each confirmed path, recheck main-program status, the account, and the identity, type, ownership, and location of the container, its metadata, and its ancestor directories without following links. Skip the item and report why if it was replaced, became a symbolic link, or cannot be verified. Do not apply the old confirmation to the new object.
 - Move confirmed paths to the account's private Trash on the same volume without overwriting. If a move cannot be verified or fails, leave the original item in place and report the reason. Do not request elevated privileges or fall back to permanent deletion.
 
-The tool README will list the exact discovery roots, reference sources, and cleanup roots. The command name does not select a distribution package name.
+The [tool README](../../crates/lfd/README.md) lists the discovery roots, reference sources, and cleanup roots. The command name does not select a distribution package name.
 
 ## Alternatives
 
@@ -45,5 +45,7 @@ The tool README will list the exact discovery roots, reference sources, and clea
 A bounded search can miss artifacts outside its scope. A missing program result is not proof of uninstallation. Moving an application-owned path can still affect retained settings, sessions, and other user data. Cleanup must not infer that evidence of a link is proof that moving the item is safe. Rechecking a path reduces the risk of acting on a replaced object, but a path can still change between the check and the move.
 
 Local prototype commit `c098828` on `prototype/app-leftovers` records the layout comparison. The prototypes use synthetic data and simulate cleanup. The browser and macOS pseudoterminal checks exercise interaction only; they do not verify discovery or filesystem changes. Verify cleanup with isolated test fixtures. Only run read-only discovery checks against existing applications or user data.
+
+Native macOS arm64 smoke checks exercise real discovery and Trash moves with isolated files. Regression checks cover staged cask apps linked by Bundle ID, executables found through registered receipts, and incomplete receipt checks.
 
 This decision does not change the accepted [CLI layout](2026-11-20-cli-source-layout.md) or [distribution design](2026-11-20-npm-cli-distribution.md).

@@ -12,9 +12,10 @@ use objc2_foundation::{
 };
 
 use crate::{
+    bundle::has_app_extension,
     discovery::{
         Application, ArtifactKind, BundleMatch, CheckIssue, CheckSource, Evidence, Item,
-        bundle_metadata, checked_metadata, entries, is_executable,
+        bundle_metadata, checked_metadata, entries, is_executable, looks_like_bundle_id,
     },
     locations::{Locations, read_metadata_file},
 };
@@ -78,22 +79,29 @@ pub fn find_packages(
     issues: &mut Vec<CheckIssue>,
 ) -> HomebrewMatches {
     let mut matches = HomebrewMatches::default();
+    let bundle_id = looks_like_bundle_id(query).then_some(query);
     for prefix in locations.homebrew_prefixes() {
         for (room, kind) in [
             ("Cellar", HomebrewKind::Formula),
             ("Caskroom", HomebrewKind::Cask),
         ] {
             for entry in entries(&prefix.join(room), SOURCE, issues) {
-                if entry.file_name() != query {
-                    continue;
-                }
                 let before = issues.len();
+                let receipt_bundle_id = if entry.file_name() == query {
+                    None
+                } else if matches!(kind, HomebrewKind::Cask) && bundle_id.is_some() {
+                    bundle_id
+                } else {
+                    continue;
+                };
                 let Some(path) = directory(entry, issues) else {
                     continue;
                 };
                 let mut scan = match kind {
                     HomebrewKind::Formula => find_formula(&path, query, require_records, issues),
-                    HomebrewKind::Cask => find_cask(locations, &path, require_records, issues),
+                    HomebrewKind::Cask => {
+                        find_cask(locations, &path, receipt_bundle_id, require_records, issues)
+                    }
                 };
                 matches
                     .unrecorded_commands
@@ -131,7 +139,7 @@ fn find_formula(
             continue;
         };
         let receipt = version.join(INSTALL_RECEIPT);
-        let record_type = installation_record(&receipt, require_records, issues)
+        let record_type = installation_record(&receipt, None, require_records, issues)
             .map(|(_, _, file_type)| file_type);
         for subdirectory in ["bin", "sbin"] {
             for entry in entries(&version.join(subdirectory), SOURCE, issues) {
@@ -157,12 +165,14 @@ fn find_formula(
 fn find_cask(
     locations: &Locations,
     cask: &Path,
+    receipt_bundle_id: Option<&str>,
     require_records: bool,
     issues: &mut Vec<CheckIssue>,
 ) -> PackageScan {
     let mut scan = PackageScan::default();
     let receipt = cask.join(".metadata").join(INSTALL_RECEIPT);
-    let Some((record, source, file_type)) = installation_record(&receipt, require_records, issues)
+    let Some((record, source, file_type)) =
+        installation_record(&receipt, receipt_bundle_id, require_records, issues)
     else {
         return scan;
     };
@@ -228,7 +238,7 @@ fn find_cask(
 }
 
 fn installed_app_path(target: &Path, directories: &[PathBuf; 5]) -> Option<PathBuf> {
-    if !is_application(target) {
+    if !has_app_extension(target) {
         return None;
     }
     if is_name(target) {
@@ -301,7 +311,7 @@ fn cask_artifacts(
                 let source = app
                     .firstObject()
                     .and_then(string_path)
-                    .filter(|path| is_relative_path(path) && is_application(path))
+                    .filter(|path| is_relative_path(path) && has_app_extension(path))
                     .ok_or_else(|| io::Error::other("Invalid Homebrew cask app path"))?;
                 let target = if app.len() > 1 {
                     let options = app
@@ -338,6 +348,40 @@ fn cask_artifacts(
     })
 }
 
+fn cask_record_matches_bundle_id(record: &NSDictionary, bundle_id: &str) -> bool {
+    let Some(artifacts) =
+        field(record, "uninstall_artifacts").and_then(|value| value.downcast::<NSArray>().ok())
+    else {
+        return false;
+    };
+    let matches_id = |value: Retained<AnyObject>| {
+        value
+            .downcast::<NSString>()
+            .is_ok_and(|value| value.to_string() == bundle_id)
+    };
+    autoreleasepool(|_| {
+        artifacts.to_vec().into_iter().any(|artifact| {
+            artifact
+                .downcast::<NSDictionary>()
+                .ok()
+                .and_then(|artifact| field(&artifact, "uninstall"))
+                .and_then(|value| value.downcast::<NSArray>().ok())
+                .is_some_and(|actions| {
+                    actions.to_vec().into_iter().any(|action| {
+                        action
+                            .downcast::<NSDictionary>()
+                            .ok()
+                            .and_then(|action| field(&action, "quit"))
+                            .is_some_and(|value| match value.downcast::<NSArray>() {
+                                Ok(identifiers) => identifiers.to_vec().into_iter().any(matches_id),
+                                Err(identifier) => matches_id(identifier),
+                            })
+                    })
+                })
+        })
+    })
+}
+
 fn field(object: &NSDictionary, key: &str) -> Option<Retained<AnyObject>> {
     object.objectForKey(&NSString::from_str(key))
 }
@@ -361,11 +405,6 @@ fn is_relative_path(path: &Path) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-fn is_application(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-}
-
 fn directory(entry: fs::DirEntry, issues: &mut Vec<CheckIssue>) -> Option<PathBuf> {
     let path = entry.path();
     checked_metadata(&path, SOURCE, issues)?
@@ -375,26 +414,41 @@ fn directory(entry: fs::DirEntry, issues: &mut Vec<CheckIssue>) -> Option<PathBu
 
 fn installation_record(
     path: &Path,
+    receipt_bundle_id: Option<&str>,
     required: bool,
     issues: &mut Vec<CheckIssue>,
 ) -> Option<(Retained<NSDictionary>, Retained<NSDictionary>, fs::FileType)> {
-    match read_installation_record(path) {
-        Ok(record) => Some(record),
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !required => None,
+    let (record, file_type) = match read_installation_record(path) {
+        Ok(record) => record,
+        // A missing receipt is only an issue after identifying the installation.
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && (!required || receipt_bundle_id.is_some()) =>
+        {
+            return None;
+        }
         Err(error) => {
             issues.push(CheckIssue {
                 source: SOURCE,
                 path: path.to_path_buf(),
                 error,
             });
-            None
+            return None;
         }
+    };
+    if receipt_bundle_id.is_some_and(|id| !cask_record_matches_bundle_id(&record, id)) {
+        return None;
     }
+    let Some(source) =
+        field(&record, "source").and_then(|value| value.downcast::<NSDictionary>().ok())
+    else {
+        record_issue(path, "Missing Homebrew installation record source", issues);
+        return None;
+    };
+    Some((record, source, file_type))
 }
 
-fn read_installation_record(
-    path: &Path,
-) -> io::Result<(Retained<NSDictionary>, Retained<NSDictionary>, fs::FileType)> {
+fn read_installation_record(path: &Path) -> io::Result<(Retained<NSDictionary>, fs::FileType)> {
     let (bytes, file_type) = read_metadata_file(path, "Homebrew installation record")?;
     autoreleasepool(|_| {
         let value = NSJSONSerialization::JSONObjectWithData_options_error(
@@ -405,10 +459,7 @@ fn read_installation_record(
         let record = value
             .downcast::<NSDictionary>()
             .map_err(|_| io::Error::other("Expected a Homebrew installation record dictionary"))?;
-        let source = field(&record, "source")
-            .and_then(|value| value.downcast::<NSDictionary>().ok())
-            .ok_or_else(|| io::Error::other("Missing Homebrew installation record source"))?;
-        Ok((record, source, file_type))
+        Ok((record, file_type))
     })
 }
 

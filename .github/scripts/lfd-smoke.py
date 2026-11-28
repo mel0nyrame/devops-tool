@@ -205,6 +205,75 @@ class ContainerTests(IsolatedTests):
         self.assertTrue(container.is_dir())
         self.assertEqual(command.read_text(), "not launched")
 
+    def test_bom_executable_with_a_different_name_keeps_a_container_view_only(self):
+        bundle_id = "org.lfd.receiptcommand"
+        container = make_container(self.home, bundle_id)
+        bin_dir = self.root / "usr/local/bin"
+        bin_dir.mkdir(parents=True)
+        command = bin_dir / "receipt-tool"
+        command.write_text("not launched")
+        command.chmod(0o700)
+        receipt = make_receipt(self.root, bundle_id, "Receipt command", "/usr/local")
+        make_receipt_bom(receipt, ["bin", "bin/receipt-tool"])
+
+        # Selection must use the fallback command directories even if they are absent from PATH.
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Related items")
+        session.expect("Registered .pkg receipt")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: main program found")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(command.read_text(), "not launched")
+
+    def test_cask_receipt_bundle_id_keeps_a_staged_app_container_view_only(self):
+        bundle_id = "org.lfd.stagedcask"
+        container = make_container(self.home, bundle_id)
+        cask = self.root / "opt/homebrew/Caskroom/staged-cask"
+        app = make_app(cask / "1.0", "Staged.app", "Staged", bundle_id)
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir()
+        receipt.write_text(json.dumps({"source": {"version": "1.0"}, "uninstall_artifacts": [
+            {"uninstall": [{"quit": bundle_id}]}, {"app": [app.name]},
+        ]}))
+
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Related items")
+        session.expect(re.escape(str(app)))
+        session.expect("Local Homebrew installation record")
+        session.send(b"\x1b[B\x1b[B")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: main program found")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertTrue(app.is_dir())
+
+    def test_unreadable_cask_receipt_keeps_an_exact_id_container_view_only(self):
+        bundle_id = "org.lfd.unreadablecask"
+        container = make_container(self.home, bundle_id)
+        receipt = self.root / "opt/homebrew/Caskroom/another-name/.metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text("invalid JSON")
+
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Main program check incomplete")
+        session.expect(re.escape(str(container)))
+        session.expect("View only: required main program checks incomplete")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.send(b"i")
+        session.expect(re.escape(str(receipt)))
+        session.quit()
+        self.assertTrue(container.is_dir())
+
     def test_skips_a_container_when_an_app_appears_after_review(self):
         bundle_id = "org.lfd.appappears"
         container = make_container(self.home, bundle_id)
@@ -219,6 +288,35 @@ class ContainerTests(IsolatedTests):
         session.send(b"\x1b[C\r")
         session.expect("Skipped: main program found")
         session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(list(trash.iterdir()), [])
+
+    def test_skips_a_container_when_a_cask_receipt_links_a_staged_app_after_review(self):
+        bundle_id = "org.lfd.caskafterreview"
+        container = make_container(self.home, bundle_id)
+        trash = self.home / ".Trash"
+        trash.mkdir(mode=0o700)
+        package_receipt = make_receipt(self.root, bundle_id, "Cask after review")
+        make_receipt_bom(package_receipt, [])
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Registered .pkg receipt")
+        session.send(b"\x1b[B")
+        session.expect("Space to select")
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+
+        cask = self.root / "usr/local/Caskroom/late-cask"
+        app = make_app(cask / "1.0", "Late.app", "Late", bundle_id)
+        receipt = cask / ".metadata/INSTALL_RECEIPT.json"
+        receipt.parent.mkdir()
+        receipt.write_text(json.dumps({"source": {"version": "1.0"}, "uninstall_artifacts": [
+            {"uninstall": [{"quit": ["org.lfd.other", bundle_id]}]}, {"app": [app.name]},
+        ]}))
+        session.send(b"\x1b[C\r")
+        session.expect("Skipped: main program found")
+        session.quit()
+        self.assertTrue(app.is_dir())
         self.assertTrue(container.is_dir())
         self.assertEqual(list(trash.iterdir()), [])
 
@@ -1078,6 +1176,7 @@ class FixtureTests(IsolatedTests):
 
     def test_exact_pkg_identifier_shows_registered_receipt_as_view_only(self):
         receipt = make_receipt(self.root, "org.lfd.receipt", "Receipt Tool")
+        make_receipt_bom(receipt, [])
         original = receipt.read_bytes()
         session = self.start()
         session.search("org.lfd.receipt")
@@ -1089,6 +1188,44 @@ class FixtureTests(IsolatedTests):
         session.expect("historical evidence")
         session.quit()
         self.assertEqual(receipt.read_bytes(), original)
+
+    def test_missing_bom_leaves_matching_receipt_as_a_possible_match(self):
+        bundle_id = "org.lfd.missingbom"
+        receipt = make_receipt(self.root, bundle_id, "Missing BOM")
+        original = receipt.read_bytes()
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Main program check incomplete")
+        session.expect("Possible matches")
+        session.expect("Registered .pkg receipt")
+        session.send(b"i")
+        session.expect(re.escape(str(receipt.with_suffix(".bom"))))
+        session.expect("Registered .pkg receipts")
+        session.quit()
+        self.assertEqual(receipt.read_bytes(), original)
+        self.assertFalse(receipt.with_suffix(".bom").exists())
+
+    def test_pkg_receipt_shows_an_existing_command_on_path_with_a_different_name(self):
+        bundle_id = "org.lfd.receiptonpath"
+        bin_dir = self.root / "tools"
+        bin_dir.mkdir()
+        command = bin_dir / "installed-tool"
+        command.write_text("not launched")
+        command.chmod(0o700)
+        plain_file = bin_dir / "non-executable-receipt-file"
+        plain_file.touch()
+        receipt = make_receipt(self.root, bundle_id, "On PATH", "/tools")
+        make_receipt_bom(receipt, [command.name, plain_file.name])
+
+        session = self.start(bin_dir)
+        session.search(bundle_id)
+        session.expect("Related items")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(command)))
+        session.expect("Recorded by the registered .pkg receipt")
+        self.assertNotIn(plain_file.name, session.screen.text())
+        session.quit()
+        self.assertEqual(command.read_text(), "not launched")
 
     def test_receipt_matches_stay_view_only_in_cleanup_preview(self):
         bundle_id = "org.lfd.receiptpreview"

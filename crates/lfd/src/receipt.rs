@@ -8,10 +8,10 @@ use std::{
 };
 
 use crate::{
-    bundle::parse_metadata,
+    bundle::{has_app_extension, parse_metadata},
     discovery::{
         ArtifactKind, CheckIssue, CheckSource, Evidence, Item, MainProgram, UserDataDirectory,
-        entries, same_name,
+        entries, is_executable, same_name,
     },
     locations::{Locations, check_path},
     plist,
@@ -93,13 +93,13 @@ pub fn find(locations: &Locations, query: &str, issues: &mut Vec<CheckIssue>) ->
 pub struct ReceiptInspection {
     pub items: Vec<Item>,
     // A receipt is a source of leads, not a check for absence of the application.
-    pub application_check: Option<MainProgram>,
+    pub program_check: Option<MainProgram>,
 }
 
 impl ReceiptInspection {
-    fn note_application_check(&mut self, check: MainProgram) {
-        self.application_check = Some(
-            self.application_check
+    fn note_program_check(&mut self, check: MainProgram) {
+        self.program_check = Some(
+            self.program_check
                 .map_or(check, |previous| previous.including(check)),
         );
     }
@@ -110,6 +110,7 @@ impl Receipt {
         &self,
         locations: &Locations,
         data_dirs: &[UserDataDirectory],
+        command_dirs: &[PathBuf],
         issues: &mut Vec<CheckIssue>,
     ) -> ReceiptInspection {
         let mut inspection = ReceiptInspection::default();
@@ -124,7 +125,13 @@ impl Receipt {
             in_cleanup_scope: false,
         });
         let bom = self.path.with_extension("bom");
-        let paths = match scope_paths(locations, data_dirs, self.prefix.as_deref(), &bom) {
+        let paths = match scope_paths(
+            locations,
+            data_dirs,
+            command_dirs,
+            self.prefix.as_deref(),
+            &bom,
+        ) {
             Ok(paths) => paths,
             Err(error) => {
                 issues.push(CheckIssue {
@@ -132,6 +139,7 @@ impl Receipt {
                     path: bom,
                     error,
                 });
+                inspection.note_program_check(MainProgram::Incomplete);
                 return inspection;
             }
         };
@@ -142,12 +150,13 @@ impl Receipt {
         } in paths
         {
             let is_bundle = matches!(kind, ArtifactKind::ApplicationBundle);
+            let is_command = matches!(kind, ArtifactKind::StandaloneCommand);
             let metadata = match check_path(&path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    if is_bundle {
-                        inspection.note_application_check(MainProgram::Incomplete);
+                    if is_bundle || is_command {
+                        inspection.note_program_check(MainProgram::Incomplete);
                     }
                     issues.push(CheckIssue {
                         source: CheckSource::PackageReceiptPaths,
@@ -167,11 +176,11 @@ impl Receipt {
                 };
                 match verification {
                     Ok(identifier) => {
-                        inspection.note_application_check(MainProgram::Found);
+                        inspection.note_program_check(MainProgram::Found);
                         Some(identifier)
                     }
                     Err(error) => {
-                        inspection.note_application_check(MainProgram::Incomplete);
+                        inspection.note_program_check(MainProgram::Incomplete);
                         issues.push(CheckIssue {
                             source: CheckSource::PackageReceiptPaths,
                             path,
@@ -181,6 +190,12 @@ impl Receipt {
                     }
                 }
             } else {
+                if is_command {
+                    if !is_executable(&metadata) {
+                        continue;
+                    }
+                    inspection.note_program_check(MainProgram::Found);
+                }
                 None
             };
             inspection.items.push(Item {
@@ -251,6 +266,7 @@ fn bom_checksum(bytes: &[u8]) -> u32 {
 fn scope_paths(
     locations: &Locations,
     data_dirs: &[UserDataDirectory],
+    command_dirs: &[PathBuf],
     prefix: Option<&str>,
     bom: &Path,
 ) -> io::Result<Vec<RecordedPath>> {
@@ -306,6 +322,11 @@ fn scope_paths(
         let path = root.join(relative);
         if is_application_path(&path, &application_dirs) {
             paths.insert(path, ArtifactKind::ApplicationBundle);
+        } else if path
+            .parent()
+            .is_some_and(|parent| command_dirs.iter().any(|dir| dir == parent))
+        {
+            paths.insert(path, ArtifactKind::StandaloneCommand);
         } else if let Some(directory) = data_dirs
             .iter()
             .find(|directory| Some(directory.path.as_path()) == path.parent())
@@ -344,7 +365,5 @@ fn scope_paths(
 fn is_application_path(path: &Path, application_dirs: &[PathBuf]) -> bool {
     path.parent()
         .is_some_and(|parent| application_dirs.iter().any(|directory| directory == parent))
-        && path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        && has_app_extension(path)
 }

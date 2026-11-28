@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    bundle::{BundleMetadata, read_metadata},
+    bundle::{BundleMetadata, has_app_extension, read_metadata},
     cleanup::{CONTAINERS, Snapshot},
     homebrew::{self, HomebrewKind, HomebrewPackage},
     locations::{Locations, check_path},
@@ -334,10 +334,12 @@ impl Search {
                 package.check_incomplete || (package.checks_path && path_check_incomplete),
             ),
             Some(Identity::PackageReceipt(package)) => {
-                receipt = package.inspect(locations, &data_dirs, &mut issues);
-                receipt.application_check.unwrap_or_else(|| {
-                    MainProgram::from_check(false, main_program_check_incomplete)
-                })
+                let before = issues.len();
+                let command_dirs = path_command_dirs(locations, &mut issues);
+                let incomplete = main_program_check_incomplete || issues.len() != before;
+                receipt = package.inspect(locations, &data_dirs, &command_dirs, &mut issues);
+                MainProgram::from_check(false, incomplete)
+                    .including(receipt.program_check.unwrap_or(MainProgram::NotFound))
             }
             Some(_) => MainProgram::Found,
             None => MainProgram::from_check(false, main_program_check_incomplete),
@@ -414,7 +416,7 @@ pub fn check_container_program(
 ) -> MainProgram {
     let mut issues = Vec::new();
     let applications = find_applications(locations, query, true, &mut issues);
-    let mut path_dirs = locations.path_dirs();
+    let mut path_dirs = path_command_dirs(locations, &mut issues);
     for relative in [
         "usr/bin",
         "bin",
@@ -428,7 +430,7 @@ pub fn check_container_program(
             path_dirs.push(directory);
         }
     }
-    let commands = check_path_commands(path_dirs, query, &mut issues);
+    let commands = check_path_commands(&path_dirs, query, &mut issues);
     let brew = homebrew::find_packages(locations, query, true, &mut issues);
     let mut check = MainProgram::from_check(
         !applications.is_empty()
@@ -438,9 +440,9 @@ pub fn check_container_program(
         brew.packages.iter().any(|package| package.check_incomplete),
     );
     for receipt in receipt::find(locations, query, &mut issues) {
-        let inspection = receipt.inspect(locations, &[], &mut issues);
-        if let Some(application_check) = inspection.application_check {
-            check = check.including(application_check);
+        let inspection = receipt.inspect(locations, &[], &path_dirs, &mut issues);
+        if let Some(program_check) = inspection.program_check {
+            check = check.including(program_check);
         }
     }
     check = check.including(MainProgram::from_check(false, !issues.is_empty()));
@@ -461,31 +463,40 @@ fn find_path_commands(
     query: &str,
     issues: &mut Vec<CheckIssue>,
 ) -> Vec<Item> {
-    check_path_commands(locations.path_dirs(), query, issues)
+    check_path_commands(&path_command_dirs(locations, issues), query, issues)
 }
 
-fn check_path_commands(
-    directories: Vec<PathBuf>,
-    query: &str,
-    issues: &mut Vec<CheckIssue>,
-) -> Vec<Item> {
-    let mut commands: Vec<Item> = Vec::new();
-    for directory in directories {
-        let path = if directory.is_absolute() {
-            directory.join(query)
-        } else {
+fn path_command_dirs(locations: &Locations, issues: &mut Vec<CheckIssue>) -> Vec<PathBuf> {
+    locations
+        .path_dirs()
+        .into_iter()
+        .filter_map(|directory| {
+            if directory.is_absolute() {
+                return Some(directory);
+            }
             match std::env::current_dir() {
-                Ok(current) => current.join(directory).join(query),
+                Ok(current) => Some(current.join(directory)),
                 Err(error) => {
                     issues.push(CheckIssue {
                         source: CheckSource::PathCommand,
                         path: directory,
                         error,
                     });
-                    continue;
+                    None
                 }
             }
-        };
+        })
+        .collect()
+}
+
+fn check_path_commands(
+    directories: &[PathBuf],
+    query: &str,
+    issues: &mut Vec<CheckIssue>,
+) -> Vec<Item> {
+    let mut commands: Vec<Item> = Vec::new();
+    for directory in directories {
+        let path = directory.join(query);
         if let Some(metadata) = checked_metadata(&path, CheckSource::PathCommand, issues)
             && is_executable(&metadata)
             && !commands.iter().any(|item| item.path == path)
@@ -536,10 +547,7 @@ fn find_applications(
         for entry in entries(&directory, CheckSource::Applications, issues) {
             let path = entry.path();
             let stem = path.file_stem().and_then(|name| name.to_str());
-            if !path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
-            {
+            if !has_app_extension(&path) {
                 continue;
             }
             let file_type = match entry.file_type() {
@@ -857,7 +865,7 @@ fn selection_evidence(locations: &Locations, query: &str) -> (Option<PathBuf>, M
     (registration, supplemental)
 }
 
-fn looks_like_bundle_id(query: &str) -> bool {
+pub fn looks_like_bundle_id(query: &str) -> bool {
     query.contains('.')
         && query.split('.').all(|part| {
             !part.is_empty()

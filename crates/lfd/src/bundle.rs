@@ -15,6 +15,11 @@ pub struct ParsedBundle {
     pub invalid_keys: Vec<&'static str>,
 }
 
+pub fn has_app_extension(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+}
+
 pub fn read_metadata(path: &Path) -> io::Result<ParsedBundle> {
     parse_metadata(&read_bytes(path)?)
 }

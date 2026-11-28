@@ -22,7 +22,7 @@ cargo run --locked --offline -p lfd
 | --- | --- |
 | `/Applications`、`/Applications/Utilities`、`/System/Applications`、`/System/Applications/Utilities`、`~/Applications` | 直接子项中的 `.app` 目录。匹配去掉 `.app` 的目录名，或读取 `Contents/Info.plist`（最多 4 MiB）中的 `CFBundleDisplayName`、`CFBundleName`、`CFBundleIdentifier`。使用可读字段；缺少元数据时仍可按目录名匹配。不验证或启动应用的可执行文件。 |
 | `PATH` 中的目录 | 检查与查询命令名对应的条目。命令必须是设置了至少一个执行权限位的普通文件；不检查其内容，也不启动它。 |
-| `/opt/homebrew` 和 `/usr/local` 下的 `Cellar/<formula>/<version>` 和 `Caskroom/<cask>` | 精确匹配包名。对 formula，读取 `INSTALL_RECEIPT.json` 并检查各版本 `bin` 和 `sbin` 目录的直接子项。缺少可用记录时，只报告同名可执行文件，名称并非归属证据。对 cask，读取 `.metadata/INSTALL_RECEIPT.json` 并检查应用目录中的 `app` 目标（默认 `/Applications`）；未找到时检查该版本在 Caskroom 的暂存应用包。对 `binary`，仅检查该版本目录内的源文件。每份记录最多读取 4 MiB，不检查其他类型的安装项或范围外路径。 |
+| `/opt/homebrew` 和 `/usr/local` 下的 `Cellar/<formula>/<version>` 和 `Caskroom/<cask>` | 精确匹配包名。Cask 也可按收据中 `uninstall` 操作的 `quit` 字段精确匹配 Bundle ID。对 formula，读取 `INSTALL_RECEIPT.json` 并检查各版本 `bin` 和 `sbin` 目录中的直接可执行文件。缺少可用记录时，只按名称报告同名可执行文件。对 cask，读取 `.metadata/INSTALL_RECEIPT.json` 并检查应用目录中的 `app` 目标，默认目录为 `/Applications`。目标缺失时，检查该版本在 Caskroom 的暂存应用包。也检查该版本目录内的 `binary` 源文件。每份记录最多读取 4 MiB。 |
 | `~/Library/Application Support`、`~/Library/Group Containers`、`~/Library/Caches`、`~/Library/Logs` | 仅匹配直接子项的名称。 |
 | `~/Library/Containers` | 匹配直接子项的名称；对于匹配的应用容器目录，读取[清理范围](#清理范围)所列的 macOS 元数据文件。 |
 | `~/Library/Preferences`、`~/Library/Saved Application State` | 仅匹配直接子项的名称，分别去掉 `.plist` 和 `.savedState` 后匹配。 |
@@ -31,7 +31,7 @@ cargo run --locked --offline -p lfd
 
 应用名称匹配不区分大小写；元数据中的 Bundle ID 必须精确匹配，包括大小写。若元数据中有精确匹配的 ID，则优先于名称匹配。文件可按本机元数据中的 Bundle ID 精确匹配，也可按文件名匹配查询。形如 Bundle ID 的点分查询要求精确匹配文件名。仅凭用户输入的标识符不能证明归属。没有匹配元数据的路径名称命中仍只是文件名匹配。
 
-匹配应用元数据中的精确 Bundle ID 时，主程序检查只针对应用目录。若未匹配到精确 Bundle ID 或已登记的 `.pkg` 包标识符，则按名称检查应用目录和 `PATH`，并在标准 Homebrew 位置检查精确匹配的包名。Homebrew 记录可指向待检查的主程序，但记录本身不能证明主程序仍在。记录缺失时继续其他检查。以上是查找规则；清理使用下文列出的组合检查。Homebrew 的全局位置只供查看；`lfd` 不调用 Homebrew、不联网、不执行脚本。
+精确匹配应用元数据中的 Bundle ID 时，查找范围缩小到应用目录。如果应用元数据和已登记的 `.pkg` 收据都没有精确匹配的 ID，`lfd` 会检查应用目录、`PATH` 和上面列出的 Homebrew 位置。Homebrew 记录提供待检查的主程序路径。记录缺失时继续其他检查。Homebrew 的全局位置只供查看。`lfd` 不调用 Homebrew、不联网，也不运行脚本。
 
 按路径名称查找时，不进入用户数据目录的子目录。不沿符号链接进入目标，包括 `PATH` 上的命令链接。匹配的用户数据链接可能出现在结果中，但不检查链接目标。缺失的查找目录视为没有条目；读取错误和元数据检查失败单独报告。不查找整个主目录、浏览器数据或 Shell 历史。
 
@@ -40,6 +40,8 @@ cargo run --locked --offline -p lfd
 `lfd` 读取 `/private/var/db/receipts` 下已登记的收据 plist（每个最多 4 MiB）。可按区分大小写的精确 `PackageIdentifier` 匹配，也可按收据记录的安装包文件名（去掉 `.pkg`）匹配，后者不区分大小写。如果安装包文件名只是重复包标识符，包标识符仍区分大小写。`lfd` 使用 macOS 的 `/usr/bin/lsbom` 读取匹配收据的 `.bom`，根据 `InstallPrefixPath` 确定记录的位置。不打开下载的安装包，不运行脚本。没有匹配收据时仍会执行其他查找。
 
 只有上述查找范围内当前仍存在的收据路径才可能出现在结果中。若收据指向上述应用目录内的 `.app`，`lfd` 会检查当前应用包并读取其 `Contents/Info.plist`，不沿符号链接。可读的 Bundle ID 与包标识符相同，或当前元数据的大小和校验和与收据记录相符，才能印证该应用包。这不验证其可执行文件，也不证明当前归属。如果无法检查记录中的 `.app` 路径，或无法印证当前应用包的身份，`lfd` 不将其列入结果，并将主程序检查标为未完成。按 `i` 可查看路径和原因。收据本身不能证明主程序存在或缺失，记录中的路径现在不存在也不能证明主程序缺失。收据及由收据匹配的路径只供查看。
+
+对于记录在 `PATH` 目录下的直接子项，`lfd` 检查该文件当前是否可执行。命令名可以与查询词不同。如果没有找到主程序，并且 BOM 缺失、无法读取或记录的命令路径无法检查，`lfd` 会将主程序检查标为未完成。
 
 ## 查找范围：共享引用内容
 
@@ -58,7 +60,7 @@ cargo run --locked --offline -p lfd
 
 普通构建只能移动当前 macOS 账户主目录下的 `~/Library/Containers/<bundle-id>`，即整个应用容器目录。其中的 `.com.apple.containermanagerd.metadata.plist` 必须是可读、可核实的普通文件（最多 4 MiB），且字段 `MCMMetadataIdentifier` 必须与目录的 Bundle ID 精确一致，包括大小写。`lfd` 仅读取这一个元数据文件来核对归属，不读取容器内其他内容。元数据缺失、不可读、是链接、标识符不一致，或路径和对象无法核实时，项目仅供查看。此证据只适用于该容器，不适用于同名缓存、偏好、其他应用数据或 `~/Library/Group Containers` 中的共享容器。共享引用、收据、全局位置及单独的符号链接也只供查看。查询标识符、路径名称或旧收据本身均不授予清理许可。
 
-只有必要的主程序检查均已完成且未发现主程序，才能勾选容器。`lfd` 会组合检查标准应用目录、`PATH` 和 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`、`/usr/local/bin`、`/opt/homebrew/bin` 中同名的独立命令、匹配的 Homebrew 安装，以及已登记 `.pkg` 收据指向标准应用目录内应用包的线索。精确匹配收据或选择身份不会跳过这些检查。遇到匹配的 Homebrew 安装却缺少记录、收据不可读或收据所指的应用包无法核实时，检查可能不完整。发现主程序或必要检查不完整均禁止勾选。
+只有必要的主程序检查均已完成且未发现主程序，才能勾选容器。`lfd` 检查标准应用目录、匹配的 Homebrew 安装，以及 `PATH` 和 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`、`/usr/local/bin`、`/opt/homebrew/bin` 中的同名命令。`lfd` 也检查已登记的 `.pkg` 收据指向这些目录中的应用包和可执行文件。选择身份或精确匹配收据后，仍会执行上述检查。Cask 收据不可读时，按 Bundle ID 查找可能无法完成。发现主程序或必要检查未完成时，禁止勾选。
 
 默认没有勾选项。按 `Space` 勾选或取消勾选合格项，按 `Enter` 核对已选路径。清单列出完整路径，说明目录包含所有子项，并提示保留的用户数据可能一并移动。若同时勾选父目录和其中的子项，清单只列出父目录。路径中的换行显示为 `\n`，字面反斜杠显示为 `\\`。按 `Enter` 确认默认的**取消**，或按 `Esc`，均不会移动任何文件。要移动核对过的路径，按 `→` 选中**移到废纸篓**，再按 `Enter`。结果逐项显示已移动的路径，以及跳过或失败的原因。
 

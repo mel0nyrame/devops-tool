@@ -13,10 +13,27 @@ use crate::{
 enum View {
     Search,
     Choose(Search),
-    Results(Report),
+    Results(Report, ResultsMode),
 }
 
-#[derive(Clone, Copy)]
+impl View {
+    fn results(report: Report) -> Self {
+        Self::Results(
+            report,
+            ResultsMode::Browse {
+                empty_preview: false,
+            },
+        )
+    }
+}
+
+enum ResultsMode {
+    Browse { empty_preview: bool },
+    Issues,
+    Review(ReviewAction),
+    Outcomes(Vec<Outcome>),
+}
+
 enum ReviewAction {
     Cancel,
     MoveToTrash,
@@ -28,10 +45,6 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
     let mut error = "";
     let mut selection = ListState::default().with_selected(Some(0));
     let mut issue_selection = ListState::default().with_selected(Some(0));
-    let mut show_issues = false;
-    let mut review = None;
-    let mut outcomes: Option<Vec<Outcome>> = None;
-    let mut empty_preview = false;
     let mut marked = BTreeSet::<usize>::new();
     let mut detail_scroll = 0_u16;
     loop {
@@ -40,28 +53,28 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             View::Choose(check) => {
                 ui::draw_choices(frame, &check.matches, &mut selection, detail_scroll)
             }
-            View::Results(_) if outcomes.is_some() => ui::draw_outcomes(
-                frame,
-                outcomes.as_deref().unwrap_or_default(),
-                detail_scroll,
-            ),
-            View::Results(report) if review.is_some() => ui::draw_preview(
-                frame,
-                &preview_items(report, &marked),
-                matches!(review, Some(ReviewAction::MoveToTrash)),
-                detail_scroll,
-            ),
-            View::Results(report) if show_issues => {
-                ui::draw_issues(frame, &report.issues, &mut issue_selection, detail_scroll)
-            }
-            View::Results(report) => ui::draw_report(
-                frame,
-                report,
-                &mut selection,
-                &marked,
-                empty_preview,
-                detail_scroll,
-            ),
+            View::Results(report, mode) => match mode {
+                ResultsMode::Browse { empty_preview } => ui::draw_report(
+                    frame,
+                    report,
+                    &mut selection,
+                    &marked,
+                    *empty_preview,
+                    detail_scroll,
+                ),
+                ResultsMode::Issues => {
+                    ui::draw_issues(frame, &report.issues, &mut issue_selection, detail_scroll)
+                }
+                ResultsMode::Review(action) => ui::draw_preview(
+                    frame,
+                    &preview_items(report, &marked),
+                    matches!(action, ReviewAction::MoveToTrash),
+                    detail_scroll,
+                ),
+                ResultsMode::Outcomes(outcomes) => {
+                    ui::draw_outcomes(frame, outcomes, detail_scroll)
+                }
+            },
         })?;
         let Event::Key(key) = event::read()? else {
             continue;
@@ -69,30 +82,7 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
         if key.kind == KeyEventKind::Release {
             continue;
         }
-        if let (Some(action), View::Results(report)) = (review, &view) {
-            match key.code {
-                KeyCode::Esc => {
-                    review = None;
-                    detail_scroll = 0;
-                    continue;
-                }
-                KeyCode::Left => review = Some(ReviewAction::Cancel),
-                KeyCode::Right => review = Some(ReviewAction::MoveToTrash),
-                KeyCode::Enter if key.kind == KeyEventKind::Press => {
-                    if matches!(action, ReviewAction::MoveToTrash) {
-                        outcomes = Some(cleanup::move_reviewed(
-                            locations,
-                            &preview_items(report, &marked),
-                        ));
-                    }
-                    review = None;
-                    detail_scroll = 0;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        if key.code == KeyCode::Esc
+        if (key.code == KeyCode::Esc && !matches!(view, View::Results(_, ResultsMode::Review(_))))
             || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
             || key.code == KeyCode::Char('q') && !matches!(view, View::Search)
         {
@@ -104,9 +94,6 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             KeyCode::PageUp => detail_scroll = detail_scroll.saturating_sub(5),
             KeyCode::Up | KeyCode::Down => detail_scroll = 0,
             _ => {}
-        }
-        if review.is_some() || outcomes.is_some() {
-            continue;
         }
         match view {
             View::Search => match key.code {
@@ -133,7 +120,7 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                         view = if check.matches.len() > 1 {
                             View::Choose(check)
                         } else {
-                            View::Results(check.report(locations, query, 0))
+                            View::results(check.report(locations, query, 0))
                         };
                     }
                 }
@@ -141,7 +128,7 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
             },
             View::Choose(check) => {
                 if key.code == KeyCode::Enter {
-                    view = View::Results(check.report(
+                    view = View::results(check.report(
                         locations,
                         input.trim(),
                         selection.selected().unwrap_or(0),
@@ -153,15 +140,14 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                     view = View::Choose(check);
                 }
             }
-            View::Results(ref report) => {
-                empty_preview = false;
-                if key.code == KeyCode::Char('i') && !report.issues.is_empty() {
-                    show_issues = !show_issues;
-                    detail_scroll = 0;
-                } else if show_issues {
-                    browse(&mut issue_selection, key.code, report.issues.len());
-                } else {
+            View::Results(ref report, ref mut mode) => match mode {
+                ResultsMode::Browse { empty_preview } => {
+                    *empty_preview = false;
                     match key.code {
+                        KeyCode::Char('i') if !report.issues.is_empty() => {
+                            *mode = ResultsMode::Issues;
+                            detail_scroll = 0;
+                        }
                         KeyCode::Char(' ') => {
                             if let Some(index) = selection.selected().filter(|&index| {
                                 report
@@ -174,14 +160,47 @@ pub fn run(terminal: &mut DefaultTerminal, locations: &Locations) -> io::Result<
                             }
                         }
                         KeyCode::Enter if !marked.is_empty() => {
-                            review = Some(ReviewAction::Cancel);
+                            *mode = ResultsMode::Review(ReviewAction::Cancel);
                             detail_scroll = 0;
                         }
-                        KeyCode::Enter => empty_preview = true,
+                        KeyCode::Enter => *empty_preview = true,
                         _ => browse(&mut selection, key.code, report.items.len()),
                     }
                 }
-            }
+                ResultsMode::Issues => {
+                    if key.code == KeyCode::Char('i') {
+                        *mode = ResultsMode::Browse {
+                            empty_preview: false,
+                        };
+                        detail_scroll = 0;
+                    } else {
+                        browse(&mut issue_selection, key.code, report.issues.len());
+                    }
+                }
+                ResultsMode::Review(action) => match key.code {
+                    KeyCode::Esc => {
+                        *mode = ResultsMode::Browse {
+                            empty_preview: false,
+                        };
+                        detail_scroll = 0;
+                    }
+                    KeyCode::Left => *action = ReviewAction::Cancel,
+                    KeyCode::Right => *action = ReviewAction::MoveToTrash,
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        *mode = match action {
+                            ReviewAction::Cancel => ResultsMode::Browse {
+                                empty_preview: false,
+                            },
+                            ReviewAction::MoveToTrash => ResultsMode::Outcomes(
+                                cleanup::move_reviewed(locations, &preview_items(report, &marked)),
+                            ),
+                        };
+                        detail_scroll = 0;
+                    }
+                    _ => {}
+                },
+                ResultsMode::Outcomes(_) => {}
+            },
         }
     }
 }
