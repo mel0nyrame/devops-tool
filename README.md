@@ -82,6 +82,6 @@ The [native CI workflow](.github/workflows/ci.yml) builds and tests `fsz` and `r
 
 The `fsz` check expects **8 B** when the scan skips a nested directory symlink and **13 B** when the symlink is the input. The `rmem` check covers PID search, matching process details, `Esc` to return to the list, and `q` to return to a working shell.
 
-The initial read-only `lfd` inspection was built and smoke-tested natively on macOS arm64 (26.7.3). `lfd` does not support Windows or Linux.
+The read-only `lfd` inspection was built and smoke-tested natively on macOS arm64 (26.7.3), including the cleanup preview with isolated fixtures. `lfd` does not support Windows or Linux.
 
 [Glossary](GLOSSARY.md) · [Design decisions](docs/adr/)

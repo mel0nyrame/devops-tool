@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
+    fs::{FileType, OpenOptions},
     io::{self, BufRead, BufReader},
     os::unix::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
@@ -23,6 +23,7 @@ pub struct Receipt {
     pub exact: bool,
     prefix: Option<String>,
     matched_package_filename: Option<String>,
+    file_type: FileType,
 }
 
 pub fn find(locations: &Locations, query: &str, issues: &mut Vec<CheckIssue>) -> Vec<Receipt> {
@@ -49,10 +50,11 @@ pub fn find(locations: &Locations, query: &str, issues: &mut Vec<CheckIssue>) ->
                 identifier,
                 plist::string(&dictionary, "PackageFileName"),
                 plist::string(&dictionary, "InstallPrefixPath"),
+                entry.file_type()?,
             ))
         });
         match receipt {
-            Ok((identifier, package_filename, prefix)) => {
+            Ok((identifier, package_filename, prefix, file_type)) => {
                 let exact = identifier == query;
                 let matched_package_filename = package_filename.filter(|filename| {
                     let filename = Path::new(filename);
@@ -73,6 +75,7 @@ pub fn find(locations: &Locations, query: &str, issues: &mut Vec<CheckIssue>) ->
                         exact,
                         prefix,
                         matched_package_filename,
+                        file_type,
                     });
                 }
             }
@@ -108,7 +111,8 @@ impl Receipt {
                 identifier: self.identifier.clone(),
                 matched_package_filename: self.matched_package_filename.clone(),
             },
-            symbolic_link: false,
+            file_type: self.file_type,
+            in_cleanup_scope: false,
         });
         let bom = self.path.with_extension("bom");
         let paths = match scope_paths(locations, data_dirs, self.prefix.as_deref(), &bom) {
@@ -180,7 +184,8 @@ impl Receipt {
                     receipt: self.path.clone(),
                     verified_bundle_id,
                 },
-                symbolic_link: false,
+                file_type: metadata.file_type(),
+                in_cleanup_scope: false,
             });
         }
         inspection

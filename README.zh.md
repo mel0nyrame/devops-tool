@@ -82,6 +82,6 @@ cargo install --locked --path crates/rmem
 
 `fsz` 跳过嵌套目录符号链接时应显示 **8 B**。将该链接直接作为输入时应显示 **13 B**。`rmem` 检查覆盖按 PID 搜索、打开匹配进程的详情、按 `Esc` 返回列表，以及按 `q` 退出后继续使用 shell。
 
-`lfd` 的首个只读检查版本已在 macOS arm64（26.7.3）通过原生构建和冒烟检查，不支持 Windows 或 Linux。
+`lfd` 的只读检查已在 macOS arm64（26.7.3）通过原生构建和冒烟检查，其中清理预览使用隔离测试数据验证。`lfd` 不支持 Windows 或 Linux。
 
 [术语表](GLOSSARY.md) · [设计决策](docs/adr/)

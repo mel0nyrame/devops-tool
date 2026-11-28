@@ -136,8 +136,157 @@ class IsolatedTests(unittest.TestCase):
         self.addCleanup(session.close)
         return session
 
+    def register_absent_bundle(self, bundle_id):
+        # OS-boundary responses; neither file identifies an artifact or grants eligibility.
+        records = self.root / "var" / "db" / "lfd-fixtures"
+        records.mkdir(parents=True, exist_ok=True)
+        (records / f"{bundle_id}.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": bundle_id,
+        }))
+        (records / f"{bundle_id}.checks").write_text(
+            "PATH: not found\nHomebrew: not found\nPackage receipts: not found\n"
+        )
+        return records
+
 
 class FixtureTests(IsolatedTests):
+    def test_previews_selected_data_despite_an_uncheckable_cache_location(self):
+        bundle_id = "org.lfd.preview"
+        self.register_absent_bundle(bundle_id)
+        library = self.home / "Library"
+        candidate = library / "Application Support" / bundle_id
+        candidate.mkdir(parents=True)
+        data = candidate / "session"
+        data.write_text("retained")
+        (library / "Caches").write_text("not a directory")
+
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Leftover candidates")
+        session.expect("Uncheckable locations: 1")
+        session.expect("Space to select")
+        session.expect("Selected: 0")
+        session.send(b" ")
+        session.expect("Selected: 1")
+        session.send(b"\r")
+        session.expect("Cleanup preview")
+        session.expect(re.escape(str(candidate)))
+        session.expect("Includes all descendants")
+        session.expect("may contain retained user data")
+        session.expect(r"\[ Cancel \]")
+        self.assertNotIn("Move to Trash", session.screen.text())
+        self.assertEqual(data.read_text(), "retained")
+        session.send(b"\r")
+        session.expect("Leftover candidates")
+        session.expect("Selected: 1")
+        session.quit()
+        self.assertEqual(data.read_text(), "retained")
+
+    def test_preview_lists_only_the_parent_when_parent_and_child_are_selected(self):
+        bundle_id = "org.lfd.tree"
+        self.register_absent_bundle(bundle_id)
+        directory = self.home / "Library" / "Application Support" / bundle_id
+        directory.mkdir(parents=True)
+        child = directory / "session"
+        child.write_text("retained")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(directory)))
+        session.expect("Selected: 0")
+        session.send(b"\x1b[B")
+        session.expect(re.escape(str(child)))
+        session.send(b" \r")
+        session.expect("Cleanup preview")
+        session.expect(re.escape(str(child)))
+        session.send(b"\x1b")
+        session.expect("Leftover candidates")
+        session.expect("Selected: 1")
+        session.send(b"\x1b[A \r")
+        session.expect("Cleanup preview")
+        session.expect(re.escape(str(directory)))
+        self.assertNotIn(str(child), session.screen.text())
+        session.expect("Includes all descendants")
+        session.send(b"\r")
+        session.expect("Selected: 2")
+        session.send(b" ")
+        session.expect("Selected: 1")
+        session.quit()
+        self.assertEqual(child.read_text(), "retained")
+
+    def test_preview_distinguishes_literal_backslashes_from_escaped_newlines(self):
+        bundle_id = "org.lfd.escaped"
+        self.register_absent_bundle(bundle_id)
+        directory = self.home / "Library" / "Application Support" / bundle_id
+        directory.mkdir(parents=True)
+        newline = directory / "session\nbackup"
+        backslash = directory / r"session\nbackup"
+        newline.write_text("newline data")
+        backslash.write_text("backslash data")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Selected: 0")
+        session.send(b"\x1b[B \x1b[B \r")
+        session.expect("Cleanup preview")
+        session.expect(re.escape(str(backslash)) + r" +│")
+        session.expect(re.escape(str(directory / r"session\\nbackup")) + r" +│")
+        session.send(b"\r")
+        session.expect("Selected: 2")
+        session.quit()
+        self.assertEqual(newline.read_text(), "newline data")
+        self.assertEqual(backslash.read_text(), "backslash data")
+
+    def test_incomplete_required_checks_keep_verified_data_view_only(self):
+        bundle_id = "org.lfd.partial"
+        records = self.register_absent_bundle(bundle_id)
+        candidate = self.home / "Library" / "Application Support" / bundle_id
+        candidate.mkdir(parents=True)
+        for missing_check in ("application directory", "supplemental response"):
+            with self.subTest(missing_check=missing_check):
+                if missing_check == "application directory":
+                    (self.home / "Applications").write_text("not a directory")
+                else:
+                    (self.home / "Applications").unlink()
+                    (records / f"{bundle_id}.checks").write_text("PATH: not found\n")
+                session = self.start()
+                session.search(bundle_id)
+                session.expect(re.escape(str(candidate)))
+                session.expect("Standard app-specific data path matches the registered Bundle ID")
+                session.expect("View only: required main program checks incomplete")
+                session.expect("Selection disabled: required main program checks incomplete")
+                session.send(b" \r")
+                session.expect("Nothing selected for preview")
+                self.assertNotIn("Cleanup preview", session.screen.text())
+                session.quit()
+        self.assertTrue(candidate.is_dir())
+
+    def test_links_and_lookalikes_outside_the_cleanup_scope_stay_view_only(self):
+        bundle_id = "org.lfd.scope"
+        self.register_absent_bundle(bundle_id)
+        outside = self.home / "Downloads" / bundle_id
+        outside.mkdir(parents=True)
+        target = outside / "session"
+        target.write_text("outside data")
+        link = self.home / "Library" / "Caches" / bundle_id
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside, target_is_directory=True)
+        lookalike = self.home / "Library" / "Preferences" / bundle_id
+        lookalike.parent.mkdir()
+        lookalike.write_text("not a preference plist")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(lookalike)))
+        session.expect("View only: outside the cleanup scope")
+        session.send(b" \x1b[B")
+        session.expect(re.escape(str(link)))
+        session.expect("View only: symbolic links cannot be selected")
+        self.assertNotIn(str(outside), session.screen.text())
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertEqual(lookalike.read_text(), "not a preference plist")
+        self.assertEqual(link.readlink(), outside)
+        self.assertEqual(target.read_text(), "outside data")
+
     def test_rejects_blank_and_path_queries_and_restores_terminal(self):
         session = self.start()
         session.search("  ")
@@ -232,6 +381,28 @@ class FixtureTests(IsolatedTests):
         for relative, content in sources.items():
             self.assertEqual((self.home / relative).read_text(), content)
 
+    def test_shared_references_and_group_container_stay_view_only_with_a_registered_id(self):
+        bundle_id = "org.lfd.shared"
+        self.register_absent_bundle(bundle_id)
+        container = self.home / "Library" / "Group Containers" / bundle_id
+        container.mkdir(parents=True)
+        shared = self.home / ".config" / "opencode" / "cli.json"
+        shared.parent.mkdir(parents=True)
+        contents = '{"plugin":["org.lfd.shared"],"unrelated":true}'
+        shared.write_text(contents)
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(container)))
+        session.expect("View only: outside the cleanup scope")
+        session.send(b" \x1b[B")
+        session.expect(re.escape(str(shared)))
+        session.expect("View only: a reference does not establish ownership")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        self.assertTrue(container.is_dir())
+        self.assertEqual(shared.read_text(), contents)
+
     def test_reports_references_in_direct_pi_sources_without_following_links(self):
         extensions = self.home / ".pi/agent/extensions"
         outside = self.root / "outside.js"
@@ -288,6 +459,8 @@ class FixtureTests(IsolatedTests):
         apps = self.root / "System" / "Applications" / "Utilities"
         bundle = make_app(apps, "Internal.app", "Named Tool", "org.lfd.named", binary_plist=True)
         make_app(apps, "Other.app", "Other Tool", "org.lfd.named.extra")
+        # Negative supplemental results must not override an app found on disk.
+        self.register_absent_bundle("org.lfd.named")
         preference = self.home / "Library" / "Preferences" / "org.lfd.named.plist"
         preference.parent.mkdir(parents=True)
         preference.write_text("isolated preferences")
@@ -297,11 +470,15 @@ class FixtureTests(IsolatedTests):
         session.expect("Related items")
         session.expect(re.escape(str(bundle)))
         session.expect(r"CFBundleIdentifier: org\.lfd\.named(?![.\w-])")
+        session.expect("View only: outside the cleanup scope")
         self.assertNotIn("Other.app", session.screen.text())
         session.send(b"\x1b[B")
         session.expect(re.escape(str(preference)))
         session.expect("Preferences")
         session.expect("Risk: may contain retained settings")
+        session.expect("View only: main program found")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
         session.quit()
         self.assertEqual(preference.read_text(), "isolated preferences")
 
@@ -419,6 +596,26 @@ class FixtureTests(IsolatedTests):
         session.expect("No such file or directory")
         session.quit()
 
+    def test_query_and_standard_path_alone_cannot_be_selected(self):
+        bundle_id = "org.lfd.unverified"
+        records = self.register_absent_bundle(bundle_id)
+        (records / f"{bundle_id}.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": "org.lfd.unrelated",
+        }))
+        candidate = self.home / "Library" / "Application Support" / bundle_id
+        candidate.mkdir(parents=True)
+        data = candidate / "session"
+        data.write_text("retained")
+        session = self.start()
+        session.search(bundle_id)
+        session.expect(re.escape(str(candidate)))
+        session.expect("View only: application ownership not established")
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        self.assertNotIn("Cleanup preview", session.screen.text())
+        session.quit()
+        self.assertEqual(data.read_text(), "retained")
+
     def test_fixture_build_requires_an_existing_absolute_root_and_home(self):
         no_home = self.root / "no-home"
         no_home.mkdir()
@@ -448,6 +645,33 @@ class FixtureTests(IsolatedTests):
         session.expect("historical evidence")
         session.quit()
         self.assertEqual(receipt.read_bytes(), original)
+
+    def test_receipt_matches_stay_view_only_in_cleanup_preview(self):
+        bundle_id = "org.lfd.receiptpreview"
+        self.register_absent_bundle(bundle_id)
+        caches = self.home / "Library" / "Caches"
+        candidate = caches / bundle_id
+        candidate.mkdir(parents=True)
+        data = candidate / "data"
+        data.write_text("retained")
+        receipt = make_receipt(self.root, "org.lfd.installer", bundle_id, "/home/Library/Caches")
+        bom = make_receipt_bom(receipt, [bundle_id])
+        originals = {path: path.read_bytes() for path in (receipt, bom, data)}
+
+        session = self.start()
+        session.search(bundle_id)
+        session.expect("Leftover candidates")
+        session.expect(re.escape(str(receipt)))
+        session.expect("View only: a receipt does not establish current ownership or installation")
+        session.send(b" \x1b[B")
+        session.expect(re.escape(str(candidate)))
+        session.expect("Recorded by the registered .pkg receipt")
+        session.expect("View only: a receipt does not establish current ownership or installation")
+        session.send(b" \x1b[B \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
+        session.quit()
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original)
 
     def test_pkg_receipt_shows_only_existing_paths_in_the_fixed_scope(self):
         receipt = make_receipt(self.root, "org.lfd.paths", "Path Tool", "home/Library")
@@ -612,18 +836,23 @@ class DefaultBuildTests(IsolatedTests):
         self.assertTrue(path.is_dir())
 
     def test_ignores_fixture_override(self):
-        name = "lfd Smoke Verification 7938A51"
-        make_app(self.root / "Applications", "Fixture Only.app", name, "org.lfd.fixtureonly")
+        bundle_id = "org.lfd.fixtureonly7938A51"
+        self.register_absent_bundle(bundle_id)
+        make_app(self.root / "Applications", "Fixture Only.app", "Fixture Only", bundle_id)
         ordinary_home = self.root / "ordinary-home"
-        cache = ordinary_home / "Library" / "Caches" / name
+        cache = ordinary_home / "Library" / "Caches" / bundle_id
         cache.mkdir(parents=True)
         session = Session(BINARY, ordinary_home, self.root)
         self.addCleanup(session.close)
-        session.search(name)
+        session.search(bundle_id)
         session.expect(re.escape(str(cache)))
         session.expect("Filename match only")
+        session.expect("Selection disabled: required main program checks incomplete")
         self.assertNotIn("Fixture Only.app", session.screen.text())
+        session.send(b" \r")
+        session.expect("Selected: 0 · Nothing selected for preview")
         session.quit()
+        self.assertTrue(cache.is_dir())
 
 
 if __name__ == "__main__":

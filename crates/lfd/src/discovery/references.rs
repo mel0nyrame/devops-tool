@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{FileType, OpenOptions},
     io::{self, Read},
     os::unix::fs::OpenOptionsExt,
     path::Path,
@@ -55,7 +55,7 @@ pub(super) fn find(
     let mut items = Vec::new();
     for (path, kind) in sources {
         match read_reference(&path) {
-            Ok(contents) => {
+            Ok((contents, file_type)) => {
                 let matched_term = bundle_id
                     .into_iter()
                     .chain(id_query)
@@ -72,7 +72,8 @@ pub(super) fn find(
                         evidence: Evidence::SharedReference {
                             matched_term: term.to_owned(),
                         },
-                        symbolic_link: false,
+                        file_type,
+                        in_cleanup_scope: false,
                     });
                 }
             }
@@ -102,7 +103,7 @@ fn contains_term(contents: &str, term: &str, identifier: bool) -> bool {
     })
 }
 
-fn read_reference(path: &Path) -> io::Result<String> {
+fn read_reference(path: &Path) -> io::Result<(String, FileType)> {
     const MAX_REFERENCE_SIZE: u64 = 1024 * 1024;
     if !check_path(path)?.is_file() {
         return Err(io::Error::other("reference source is not a regular file"));
@@ -124,5 +125,5 @@ fn read_reference(path: &Path) -> io::Result<String> {
     if contents.len() as u64 > MAX_REFERENCE_SIZE {
         return Err(io::Error::other("reference source exceeds 1 MiB"));
     }
-    Ok(contents)
+    Ok((contents, metadata.file_type()))
 }

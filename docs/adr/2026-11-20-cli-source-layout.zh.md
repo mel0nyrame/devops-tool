@@ -26,4 +26,4 @@
 
 分组后根目录更清晰，仍能按包独立构建；代价是工具路径增加一层，迁移时需更新相对路径和构建说明。两个工具在 Windows、macOS 和 Linux 上均有原生构建和核心冒烟验证结果。CI 在三端验证 `fsz` 的符号链接行为，并在 macOS 和 Linux 验证 `rmem` 的终端交互；Windows 的 `rmem` 交互检查在本机 CMD 中通过 WinPTY 完成。详见[平台状态](../../README.zh.md#平台状态)。这项工作不依赖 npm 分发方案。
 
-仅支持 macOS 的 `lfd` 按同一布局放在 `crates/lfd/`。首个只读应用检查版本已通过 macOS arm64 原生构建和伪终端冒烟检查。这不改变 `fsz` 和 `rmem` 的平台或分发状态。
+仅支持 macOS 的 `lfd` 按同一布局放在 `crates/lfd/`。只读应用检查及隔离测试中的清理预览已通过 macOS arm64 原生构建和伪终端冒烟检查。这不改变 `fsz` 和 `rmem` 的平台或分发状态。

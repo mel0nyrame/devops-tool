@@ -49,4 +49,14 @@ Apart from the app bundle metadata and receipt data listed above, `lfd` reads co
 
 `lfd` does not follow symbolic links to reference files or through their parent directories. Missing sources have no matches. Unreadable files, files larger than 1 MiB, and other failed checks are reported separately, not as successful searches with no matches.
 
-There are no cleanup locations. Finding a name or a shared reference does not authorize cleanup; `lfd` does not select, move, edit, or delete any items.
+## Cleanup preview
+
+The normal build leaves all items view-only: the application-directory search and receipt leads do not complete the required main-program checks for cleanup. A matching name, a typed identifier, a receipt alone, a shared reference, or a standalone symbolic link does not make an item eligible.
+
+In isolated preview verification, a complete main-program check that finds no program, plus independent Bundle ID registration evidence, can make these exact current-user paths selectable:
+
+- `~/Library/Application Support/<bundle-id>` (directory), and its immediate regular files and directories. Only their names and types are checked, not their contents; links are not followed.
+- `~/Library/Preferences/<bundle-id>.plist` (regular file).
+- `~/Library/Caches/<bundle-id>` (directory).
+
+Nothing is selected by default. Use `Space` to toggle an eligible item and `Enter` to preview the selected paths. The preview lists full paths and known risks (including retained data or settings), identifies directories as including all descendants, and lists a selected parent directory instead of any of its selected descendants. In displayed paths, a newline appears as `\n`, and a literal backslash as `\\`. Press `Enter` on the default **Cancel**, or `Esc`, to return to the results without changing the selection. This version cannot move, edit, or delete files.
