@@ -175,15 +175,15 @@ impl Search {
             }
             None => (ReceiptInspection::default(), None),
         };
-        let main_program = if receipt.application_check_incomplete {
-            MainProgram::Incomplete
-        } else if app.is_some() || receipt.application_found {
-            MainProgram::Found
-        } else if application_check_incomplete {
-            MainProgram::Incomplete
-        } else {
-            MainProgram::NotFound
-        };
+        let main_program = receipt.application_check.unwrap_or_else(|| {
+            if app.is_some() {
+                MainProgram::Found
+            } else if application_check_incomplete {
+                MainProgram::Incomplete
+            } else {
+                MainProgram::NotFound
+            }
+        });
         let mut items = receipt.items;
         let mut artifacts = find_artifacts(&data_dirs, name_query, app.as_ref(), &mut issues);
         let recorded_paths: HashSet<_> = items.iter().map(|item| item.path.as_path()).collect();

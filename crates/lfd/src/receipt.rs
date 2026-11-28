@@ -10,8 +10,8 @@ use std::{
 use crate::{
     bundle::parse_metadata,
     discovery::{
-        ArtifactKind, CheckIssue, CheckSource, Evidence, Item, UserDataDirectory, entries,
-        same_name,
+        ArtifactKind, CheckIssue, CheckSource, Evidence, Item, MainProgram, UserDataDirectory,
+        entries, same_name,
     },
     locations::{Locations, check_path},
     plist,
@@ -89,8 +89,8 @@ pub fn find(locations: &Locations, query: &str, issues: &mut Vec<CheckIssue>) ->
 #[derive(Default)]
 pub struct ReceiptInspection {
     pub items: Vec<Item>,
-    pub application_found: bool,
-    pub application_check_incomplete: bool,
+    // A receipt is a source of leads, not a check for absence of the application.
+    pub application_check: Option<MainProgram>,
 }
 
 impl Receipt {
@@ -133,7 +133,9 @@ impl Receipt {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    inspection.application_check_incomplete |= is_bundle;
+                    if is_bundle {
+                        inspection.application_check = Some(MainProgram::Incomplete);
+                    }
                     issues.push(CheckIssue {
                         source: CheckSource::PackageReceiptPaths,
                         path,
@@ -142,23 +144,29 @@ impl Receipt {
                     continue;
                 }
             };
-            if is_bundle && !metadata.is_dir() {
-                continue;
-            }
             let verified_bundle_id = if is_bundle {
-                match self.verify_bundle(&path, bundle_metadata) {
+                let verification = if metadata.is_dir() {
+                    self.verify_bundle(&path, bundle_metadata)
+                } else {
+                    Err(io::Error::other(
+                        "recorded .app path is not an application directory",
+                    ))
+                };
+                match verification {
                     Ok(identifier) => {
-                        inspection.application_found = true;
+                        inspection
+                            .application_check
+                            .get_or_insert(MainProgram::Found);
                         Some(identifier)
                     }
                     Err(error) => {
-                        inspection.application_check_incomplete = true;
+                        inspection.application_check = Some(MainProgram::Incomplete);
                         issues.push(CheckIssue {
                             source: CheckSource::PackageReceiptPaths,
-                            path: path.clone(),
+                            path,
                             error,
                         });
-                        None
+                        continue;
                     }
                 }
             } else {
